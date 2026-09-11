@@ -886,6 +886,8 @@ class JarvisLive:
                         lambda: self._plugin_registry.run(name, args, player=self.ui, session_memory=None)
                     )
                     result = r or "Done."
+                    if name == "media_studio" and r:
+                        self.ui.show_content("MEDIA STUDIO", r)
                 else:
                     result = f"Unknown tool: {name}"
 
@@ -1728,7 +1730,10 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
-    ui = JarvisUI("face.png")
+    # The generated orb is a real local asset, so the desktop HUD has a polished
+    # visual core even on a fresh clone without the old optional face.png file.
+    _orb = BASE_DIR / "dashboard" / "static" / "jarvis-orb.png"
+    ui = JarvisUI(str(_orb) if _orb.exists() else "face.png")
 
     def runner():
         ui.wait_for_api_key()

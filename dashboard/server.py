@@ -384,7 +384,9 @@ class DashboardServer:
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
-        self.app                          = self._build_app()
+        # Keep the rest of JARVIS bootable when the optional dashboard packages
+        # are not installed; serve() will emit the existing install hint.
+        self.app                          = self._build_app() if _DEPS_OK else None
 
     # ── one-time key management ───────────────────────────────────────────
 
@@ -463,6 +465,22 @@ class DashboardServer:
                                     media_type="application/javascript")
             from fastapi.responses import RedirectResponse
             return RedirectResponse(_CRYPTOJS_CDN)
+
+        @app.get("/static/{asset_path:path}")
+        async def serve_static_asset(asset_path: str):
+            """Serve the small local visual assets used by the dashboard.
+
+            This deliberately resolves inside dashboard/static so a remote
+            client can never turn the asset route into a file browser.
+            """
+            candidate = (STATIC_DIR / asset_path).resolve()
+            try:
+                candidate.relative_to(STATIC_DIR.resolve())
+            except ValueError:
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            if not candidate.exists() or not candidate.is_file():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            return FileResponse(str(candidate))
 
         @app.get("/login", response_class=HTMLResponse)
         async def login_page():
@@ -603,6 +621,106 @@ class DashboardServer:
             if self._wake_callback:
                 self._wake_callback()
             return JSONResponse({"ok": True})
+
+        # ── Dashboard overview / optional integrations ────────────────────────
+
+        def _twilio_snapshot() -> dict:
+            try:
+                from memory.config_manager import get_plugin_config
+                cfg = get_plugin_config("twilio")
+            except Exception:
+                cfg = {}
+            sid = str(cfg.get("account_sid", "") or "")
+            return {
+                "enabled": bool(cfg.get("enabled", False)),
+                "configured": bool(
+                    sid and cfg.get("auth_token") and
+                    cfg.get("from_number") and cfg.get("owner_number")
+                ),
+                # The auth token is never sent back to a browser.
+                "auth_token_set": bool(cfg.get("auth_token")),
+                "account_sid": sid,
+                "from_number": str(cfg.get("from_number", "") or ""),
+                "owner_number": str(cfg.get("owner_number", "") or ""),
+            }
+
+        @app.get("/api/overview")
+        async def overview(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            system = {"cpu": None, "memory": None, "uptime": None}
+            try:
+                import psutil
+                system = {
+                    "cpu": round(float(psutil.cpu_percent(interval=None)), 1),
+                    "memory": round(float(psutil.virtual_memory().percent), 1),
+                    "uptime": int(max(0, time.time() - psutil.boot_time())),
+                }
+            except Exception:
+                pass
+            return JSONResponse({
+                "ok": True,
+                "secure": self._ssl_enabled(),
+                "clients": len(self._clients),
+                "history": len(self._history),
+                "system": system,
+                "twilio": _twilio_snapshot(),
+            })
+
+        @app.get("/api/twilio")
+        async def twilio_status(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse(_twilio_snapshot())
+
+        @app.post("/api/twilio")
+        async def save_twilio(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            try:
+                from memory.config_manager import get_plugin_config, save_plugin_config
+                current = get_plugin_config("twilio")
+                values = {}
+                for key in ("enabled", "account_sid", "from_number", "owner_number"):
+                    if key in body:
+                        if key == "enabled":
+                            raw_enabled = body[key]
+                            values[key] = (raw_enabled if isinstance(raw_enabled, bool)
+                                           else str(raw_enabled).strip().lower() in {"1", "true", "yes", "on"})
+                        else:
+                            values[key] = str(body[key] or "").strip()
+                # An empty password means "keep the locally stored token" so
+                # the settings modal can safely load without exposing it.
+                if str(body.get("auth_token", "") or "").strip():
+                    values["auth_token"] = str(body["auth_token"]).strip()
+                elif current.get("auth_token"):
+                    values["auth_token"] = current["auth_token"]
+                save_plugin_config("twilio", values)
+            except Exception as exc:
+                return JSONResponse({"error": f"Could not save Twilio settings: {exc}"}, status_code=500)
+            return JSONResponse({"ok": True, **_twilio_snapshot()})
+
+        @app.post("/api/twilio/test")
+        async def test_twilio(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+                from memory.config_manager import get_plugin_config
+                from plugins.twilio_call import _test_connection
+                current = get_plugin_config("twilio")
+                merged = dict(current)
+                merged.update({k: v for k, v in body.items() if k in {
+                    "account_sid", "auth_token", "from_number", "owner_number"
+                } and str(v or "").strip()})
+                ok, message = await asyncio.to_thread(_test_connection, merged)
+                return JSONResponse({"ok": bool(ok), "message": str(message)})
+            except Exception as exc:
+                return JSONResponse({"ok": False, "message": str(exc)})
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

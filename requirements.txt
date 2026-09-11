@@ -38,6 +38,10 @@ qrcode[pil]
 google-api-python-client
 google-auth-oauthlib
 
+# ── Optional integrations / media skills ─────────────────────────────────────
+# Twilio is used only when the owner enables the phone bridge in Plugin Settings.
+twilio>=9.0.0
+
 # ── Plugin extras: Tuya / Smart Life smart light (home_assistant) ─────────────
 tinytuya
 
