@@ -11,6 +11,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import json
 import re
 import secrets
 import socket
@@ -380,7 +381,9 @@ class DashboardServer:
         self._connect_callback            = None
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
-        self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        # A short network hiccup should buffer audio instead of dropping the
+        # user's words. The relay keeps only the active phone turn in memory.
+        self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=500)
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -734,18 +737,46 @@ class DashboardServer:
             asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Phone microphone live."}
             ))
+            ended = False
             try:
                 while True:
-                    data = await websocket.receive_bytes()
+                    message = await websocket.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        break
+                    data = message.get("bytes")
+                    if data is not None:
+                        # Backpressure is intentional here: dropping PCM frames
+                        # is exactly what makes short words disappear. The queue
+                        # gives the Live sender room for brief network hiccups.
+                        await self._phone_audio_queue.put({
+                            "data": data,
+                            "mime_type": "audio/pcm;rate=16000",
+                        })
+                        continue
+                    text = message.get("text") or ""
                     try:
-                        self._phone_audio_queue.put_nowait(
-                            {"data": data, "mime_type": "audio/pcm"}
-                        )
-                    except asyncio.QueueFull:
-                        pass  # drop frame rather than block
+                        control = json.loads(text)
+                    except (TypeError, ValueError):
+                        control = {}
+                    if control.get("type") == "end":
+                        await self._phone_audio_queue.put({"audio_stream_end": True})
+                        ended = True
+                        break
             except WebSocketDisconnect:
                 pass
             finally:
+                # Live's automatic VAD keeps a small tail until it receives an
+                # audio_stream_end marker. Without it, tapping Stop can leave a
+                # perfectly good phone utterance waiting forever.
+                if not ended:
+                    try:
+                        self._phone_audio_queue.put_nowait({"audio_stream_end": True})
+                    except asyncio.QueueFull:
+                        try:
+                            self._phone_audio_queue.get_nowait()
+                            self._phone_audio_queue.put_nowait({"audio_stream_end": True})
+                        except (asyncio.QueueEmpty, asyncio.QueueFull):
+                            pass
                 asyncio.create_task(self.broadcast(
                     {"type": "sys", "text": "Phone microphone stopped."}
                 ))

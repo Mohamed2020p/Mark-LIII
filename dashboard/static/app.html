@@ -567,7 +567,7 @@
     document.getElementById('file-inp').addEventListener('change', function() { Array.from(this.files).forEach(uploadFile); this.value=''; });
 
     // ── Real-time browser voice — same /ws/phone-audio contract ─────────────
-    const micBtn = document.getElementById('mic-btn'); let _voiceWs=null, _audioCtx=null, _micStream=null, _audioNode=null;
+    const micBtn = document.getElementById('mic-btn'); let _voiceWs=null, _audioCtx=null, _micStream=null, _audioNode=null, _audioSink=null;
     function micIdle() { micBtn.textContent='⌁'; micBtn.title='Voice command'; micBtn.classList.remove('recording'); }
     function f32ToPcm16(f32, srcRate) { let samples=f32; if(srcRate!==16000){const ratio=srcRate/16000; const len=Math.round(f32.length/ratio); samples=new Float32Array(len); for(let i=0;i<len;i++) samples[i]=f32[Math.min(Math.round(i*ratio),f32.length-1)];} const out=new Int16Array(samples.length); for(let i=0;i<samples.length;i++) out[i]=Math.max(-32768,Math.min(32767,Math.round(samples[i]*32768))); return out.buffer; }
     async function doMic() {
@@ -579,17 +579,28 @@
       socket.onopen = async () => {
         const source=ctx.createMediaStreamSource(stream); const rate=ctx.sampleRate;
         try {
-          const code=`class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('jarvis-mic',J);`;
+          const code=`class J extends AudioWorkletProcessor{process(i,o){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());const out=o[0]?.[0];if(out)out.fill(0);return true;}}registerProcessor('jarvis-mic',J);`;
           const url=URL.createObjectURL(new Blob([code],{type:'application/javascript'})); await ctx.audioWorklet.addModule(url); URL.revokeObjectURL(url);
           const node=new AudioWorkletNode(ctx,'jarvis-mic'); let chunks=[], length=0;
           node.port.onmessage=event=>{const chunk=new Int16Array(f32ToPcm16(event.data,rate));chunks.push(chunk);length+=chunk.length;if(length>=1024){const out=new Int16Array(length);let offset=0;for(const part of chunks){out.set(part,offset);offset+=part.length;}if(socket.readyState===1)socket.send(out.buffer);chunks=[];length=0;}};
-          source.connect(node); _audioNode=node;
-        } catch (_) { const node=ctx.createScriptProcessor(4096,1,1); node.onaudioprocess=event=>{if(socket.readyState===1)socket.send(f32ToPcm16(event.inputBuffer.getChannelData(0),rate));}; source.connect(node); node.connect(ctx.destination); _audioNode=node; }
+          // A worklet with no downstream connection may be suspended by the
+          // browser. Feed a silent sink so processing stays clocked without
+          // echoing the microphone back to the user.
+          const sink=ctx.createGain(); sink.gain.value=0; node.connect(sink); sink.connect(ctx.destination);
+          source.connect(node); _audioSink=sink; _audioNode=node;
+        } catch (_) { const node=ctx.createScriptProcessor(4096,1,1); node.onaudioprocess=event=>{if(socket.readyState===1)socket.send(f32ToPcm16(event.inputBuffer.getChannelData(0),rate));}; const sink=ctx.createGain(); sink.gain.value=0; node.connect(sink); sink.connect(ctx.destination); source.connect(node); _audioSink=sink; _audioNode=node; }
         micBtn.textContent='■'; micBtn.title='Stop voice'; micBtn.classList.add('recording'); sys('Browser voice live — speak now.'); toast('Microphone live');
       };
       socket.onclose=()=>stopVoice(); socket.onerror=()=>{sys('Voice connection failed.');stopVoice();}; _voiceWs=socket; _audioCtx=ctx; _micStream=stream;
     }
-    function stopVoice() { if(_audioNode){try{_audioNode.disconnect();}catch(_){}} if(_audioCtx){try{_audioCtx.close();}catch(_){}} if(_micStream){_micStream.getTracks().forEach(track=>track.stop());} if(_voiceWs){const socket=_voiceWs;_voiceWs=null;if(socket.readyState<2)socket.close();} _audioNode=null;_audioCtx=null;_micStream=null;micIdle(); }
+    function stopVoice() {
+      if(_voiceWs){const socket=_voiceWs;_voiceWs=null;if(socket.readyState===1){try{socket.send(JSON.stringify({type:'end'}));}catch(_){}setTimeout(()=>{try{if(socket.readyState<2)socket.close();}catch(_){}},80);}else if(socket.readyState<2){socket.close();}}
+      if(_audioNode){try{_audioNode.disconnect();}catch(_){}}
+      if(_audioSink){try{_audioSink.disconnect();}catch(_){} _audioSink=null;}
+      if(_audioCtx){try{_audioCtx.close();}catch(_){} }
+      if(_micStream){_micStream.getTracks().forEach(track=>track.stop());}
+      _audioNode=null;_audioCtx=null;_micStream=null;micIdle();
+    }
 
     // ── Overview and settings ───────────────────────────────────────────────
     function formatUptime(seconds) { if(seconds == null) return '--'; const d=Math.floor(seconds/86400), h=Math.floor(seconds%86400/3600), m=Math.floor(seconds%3600/60); return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`; }

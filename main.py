@@ -94,9 +94,10 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-3.1-flash-live-preview"
 CHANNELS            = 1
-SEND_SAMPLE_RATE    = 16000 
+SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
 
 # RMS below which 16-bit PCM is treated as room silence; above _LEVEL_FULL it
 # reads as a full-height waveform. Tuned so ordinary speech lands mid-range and
@@ -360,6 +361,9 @@ class JarvisLive:
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
+        self._audio_drop_count    = 0       # input chunks discarded only under backpressure
+        self._audio_drop_log_at   = 0.0
+        self._mic_status_log_at   = 0.0
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -652,6 +656,41 @@ class JarvisLive:
             self._turn_done_event.clear()
         self.ui.write_log("SYS: Interrupted — listening...")
 
+    def _enqueue_realtime_audio(self, message: dict) -> None:
+        """Put one input frame on the Live sender queue without letting a slow
+        network call raise QueueFull inside a PortAudio callback.
+
+        Audio callbacks must never block. Under unusual backpressure we discard
+        the oldest queued frame, not the newest one, so JARVIS catches up to the
+        user's current words instead of processing stale speech many seconds
+        late. Normal operation never reaches this branch.
+        """
+        queue = self.out_queue
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(message)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        try:
+            queue.get_nowait()       # remove one stale frame
+            queue.put_nowait(message)
+            self._audio_drop_count += 1
+            now = time.monotonic()
+            if now - self._audio_drop_log_at >= 5.0:
+                self._audio_drop_log_at = now
+                self.ui.write_log(
+                    f"SYS: Audio link is catching up ({self._audio_drop_count} old frames skipped)."
+                )
+        except asyncio.QueueEmpty:
+            # A sender may have freed the slot between the two operations.
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass
+
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
@@ -739,6 +778,18 @@ class JarvisLive:
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=get_voice()
                     )
+                )
+            ),
+            # Make automatic VAD friendlier to quiet speakers and preserve the
+            # first syllable. The explicit PCM rate below also applies to phone
+            # audio, so the server never has to guess the input format.
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=False,
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                    prefix_padding_ms=240,
+                    silence_duration_ms=650,
                 )
             ),
         )
@@ -912,11 +963,17 @@ class JarvisLive:
             # (what `media=...` maps to) and closes the socket with a 1007. Send
             # mic / phone PCM through the new `audio` field instead. Queue items
             # are {"data": <bytes>, "mime_type": <str>} from _listen_audio and
-            # the phone relay.
+            # the phone relay. An end marker flushes cached VAD audio when a
+            # browser microphone is stopped.
+            if msg.get("audio_stream_end"):
+                await self.session.send_realtime_input(audio_stream_end=True)
+                continue
             await self.session.send_realtime_input(
                 audio=types.Blob(
                     data=msg["data"],
-                    mime_type=msg.get("mime_type", "audio/pcm"),
+                    # The explicit rate prevents the Live VAD from guessing the
+                    # browser/device rate and missing quiet or short utterances.
+                    mime_type=msg.get("mime_type", INPUT_AUDIO_MIME),
                 )
             )
 
@@ -925,6 +982,16 @@ class JarvisLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            if status:
+                # PortAudio can report an input overflow without stopping the
+                # stream. Surface it occasionally instead of making a missed
+                # syllable look like JARVIS ignored the user.
+                now = time.monotonic()
+                if now - self._mic_status_log_at >= 5.0:
+                    self._mic_status_log_at = now
+                    print(f"[JARVIS] ⚠️ Mic stream: {status}")
+                    self.ui.write_log("SYS: Microphone buffer recovered from an input overflow.")
+
             # ── Wake-word gate ───────────────────────────────────────────────
             # While asleep, the mic audio NEVER goes to Gemini (nothing is
             # streamed, so JARVIS can't respond to speech not addressed to it and
@@ -941,9 +1008,12 @@ class JarvisLive:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
+                # Never call Queue.put_nowait directly from the PortAudio
+                # callback: QueueFull would become an unhandled event-loop
+                # exception and silently lose the user's turn.
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
+                    self._enqueue_realtime_audio,
+                    {"data": data, "mime_type": INPUT_AUDIO_MIME}
                 )
                 # Feed the live mic level to the HUD so the waveform reacts to
                 # the user's actual voice while listening. Purely cosmetic — any
@@ -1473,14 +1543,18 @@ class JarvisLive:
                 # No audio for 1 s → phone mic inactive, give PC mic back
                 self._phone_active = False
                 continue
+            if chunk.get("audio_stream_end"):
+                # The browser stopped sending. Flush Live's cached VAD audio
+                # before handing the microphone back to the desktop stream.
+                self._phone_active = False
+                self._enqueue_realtime_audio(chunk)
+                continue
+
             self._phone_active = True   # phone is streaming — silence PC mic
             with self._speaking_lock:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
-                try:
-                    self.out_queue.put_nowait(chunk)
-                except asyncio.QueueFull:
-                    pass
+                self._enqueue_realtime_audio(chunk)
 
     def _on_phone_connected(self) -> None:
         self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
@@ -1578,7 +1652,12 @@ class JarvisLive:
                 ):
                     self.session          = session
                     self.audio_in_queue   = asyncio.Queue()
-                    self.out_queue        = asyncio.Queue(maxsize=200)
+                    # 500 x 64 ms gives the sender room for short network
+                    # hiccups without overflowing the PortAudio callback.
+                    self.out_queue        = asyncio.Queue(maxsize=500)
+                    self._audio_drop_count = 0
+                    self._audio_drop_log_at = 0.0
+                    self._mic_status_log_at = 0.0
                     self._turn_done_event = asyncio.Event()
 
                     # Reset transient state that must not carry over from a previous session
