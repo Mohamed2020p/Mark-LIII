@@ -105,6 +105,11 @@ INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
 _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
 _LOCAL_SILENCE_SECONDS = 0.78  # flush a desktop voice turn after quiet speech
+_MIN_VOICE_TURN_SECONDS = 0.08  # keep short words such as "yes" and "stop"
+# Text-first voice turns make the command path deterministic: capture a complete
+# utterance, transcribe it, then submit the exact text to the existing Live
+# session. Native audio remains the fallback if transcription is unavailable.
+VOICE_TEXT_FIRST = True
 
 
 def _pcm_level(samples) -> float:
@@ -429,19 +434,23 @@ class JarvisLive:
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
 
-        # Keep a bounded copy of the microphone turn for the text-forwarding
-        # fallback. Normally Gemini Live supplies input_audio_transcription and
-        # the audio turn proceeds natively; if a model/SDK revision returns a
-        # turn without a usable transcript or response, the optional local STT
-        # engine can recover the words and send them as ordinary text.
+        # Keep a bounded copy of each microphone turn. Text-first mode always
+        # transcribes this PCM before submitting the command; native Live audio
+        # remains the last-resort fallback when transcription is unavailable.
         self._voice_audio_buffer = bytearray()
         self._voice_audio_limit  = SEND_SAMPLE_RATE * 2 * 30  # 30 s, mono int16
+        self._voice_prebuffer    = bytearray()  # short prefix before local VAD opens
+        self._voice_prebuffer_limit = int(SEND_SAMPLE_RATE * 2 * 0.24)
+        self._voice_capture_source = None      # "desktop", "phone", or None
+        self._phone_voice_open    = False
         self._stt_engine         = None
         self._stt_attempted      = False
         self._stt_warned         = False
         self._transcribe_client  = None
         self._voice_speech_active = False
         self._voice_last_activity = 0.0
+        self._voice_text_first   = VOICE_TEXT_FIRST
+        self._voice_turn_queue   = None
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
 
@@ -698,7 +707,7 @@ class JarvisLive:
             self._turn_done_event.clear()
         self.ui.write_log("SYS: Interrupted — listening...")
 
-    def _enqueue_realtime_audio(self, message: dict) -> None:
+    def _enqueue_realtime_audio(self, message: dict, *, remember: bool = True) -> None:
         """Put one input frame on the Live sender queue without letting a slow
         network call raise QueueFull inside a PortAudio callback.
 
@@ -710,7 +719,7 @@ class JarvisLive:
         queue = self.out_queue
         if queue is None:
             return
-        if message.get("data"):
+        if remember and message.get("data"):
             self._remember_voice_audio(message["data"])
         elif message.get("audio_stream_end"):
             self.ui.set_state("PROCESSING")
@@ -747,21 +756,138 @@ class JarvisLive:
         if len(self._voice_audio_buffer) > self._voice_audio_limit:
             del self._voice_audio_buffer[:-self._voice_audio_limit]
 
+    def _remember_voice_prebuffer(self, data: bytes) -> None:
+        """Keep a small prefix so local VAD does not clip a word's first syllable."""
+        if not data:
+            return
+        self._voice_prebuffer.extend(data)
+        if len(self._voice_prebuffer) > self._voice_prebuffer_limit:
+            del self._voice_prebuffer[:-self._voice_prebuffer_limit]
+
     def _take_voice_audio(self) -> bytes:
         data = bytes(self._voice_audio_buffer)
         self._voice_audio_buffer.clear()
         return data
 
-    def _transcribe_voice_audio(self, data: bytes) -> str:
-        """Recover a command as text when a Live audio turn is silent.
+    def _reset_voice_capture(self) -> None:
+        """Discard a partial voice turn when capture is muted or interrupted."""
+        self._voice_audio_buffer.clear()
+        self._voice_prebuffer.clear()
+        self._voice_speech_active = False
+        self._voice_last_activity = 0.0
+        self._voice_capture_source = None
+        self._phone_voice_open = False
 
-        The normal path is still Gemini Live audio. A failed audio turn first
-        tries an optional local Whisper engine, then uses the same Gemini API key
+    def _handle_desktop_text_frame(
+        self, data: bytes, level: float, captured_at: float
+    ) -> None:
+        """Apply desktop VAD on the event loop and retain only one speech turn."""
+        if not data:
+            return
+        if level > 0.01:
+            if not self._voice_speech_active:
+                # Start a fresh turn, retaining only the short pre-speech tail.
+                self._voice_audio_buffer.clear()
+                self._voice_audio_buffer.extend(self._voice_prebuffer)
+                self._voice_prebuffer.clear()
+                self._voice_capture_source = "desktop"
+            self._remember_voice_audio(data)
+            self._voice_speech_active = True
+            self._voice_last_activity = captured_at
+            return
+
+        if self._voice_speech_active:
+            self._remember_voice_audio(data)
+            if captured_at - self._voice_last_activity >= _LOCAL_SILENCE_SECONDS:
+                self._finish_voice_turn()
+        else:
+            # Do not let room silence accumulate into the next command.
+            self._remember_voice_prebuffer(data)
+
+    def _finish_voice_turn(self, _unused=None) -> None:
+        """Move one locally delimited utterance to the async transcription worker."""
+        self._voice_speech_active = False
+        self._voice_last_activity = 0.0
+        self._voice_prebuffer.clear()
+        self._voice_capture_source = None
+        data = self._take_voice_audio()
+        if len(data) < int(SEND_SAMPLE_RATE * 2 * _MIN_VOICE_TURN_SECONDS):
+            return
+        queue = self._voice_turn_queue
+        if queue is None:
+            return
+        # This queue is intentionally unbounded: dropping a completed spoken
+        # command because Whisper or the network is slow defeats the whole
+        # text-first recovery path.
+        queue.put_nowait(data)
+        self.ui.set_state("PROCESSING")
+
+    async def _process_voice_turns(self) -> None:
+        """Transcribe completed voice turns, then submit their text to Live."""
+        queue = self._voice_turn_queue
+        if queue is None:
+            return
+        while True:
+            data = await queue.get()
+            try:
+                try:
+                    text = await asyncio.to_thread(self._transcribe_voice_audio, data)
+                except Exception as exc:
+                    print(f"[STT] Voice transcription worker failed: {exc}")
+                    text = ""
+
+                if text:
+                    self.ui.write_log(f"You: {text}")
+                    self._session_log.append(f"User: {text}")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast({
+                            "type": "log", "speaker": "user",
+                            "text": text,
+                            "ts": datetime.now().isoformat(),
+                        }))
+                    try:
+                        await self._forward_voice_transcript(text)
+                    except Exception as exc:
+                        # Keep the serialized worker alive so the next spoken
+                        # command is still transcribed after a transient send
+                        # failure; the Live receive loop will handle reconnects.
+                        print(f"[STT] Could not forward transcript: {exc}")
+                        self.ui.write_log("ERR: Voice command could not be sent to JARVIS.")
+                else:
+                    # Do not make the user's audio disappear if the transcription
+                    # service is temporarily unavailable. Feed that one turn through
+                    # the original native Live path as a last resort.
+                    try:
+                        await self._send_native_audio_turn(data)
+                    except Exception as exc:
+                        print(f"[STT] Native voice fallback failed: {exc}")
+                        self.ui.write_log("ERR: Voice audio could not be sent to JARVIS.")
+            finally:
+                queue.task_done()
+            # Keep PROCESSING until Live produces a response; _play_audio and
+            # _receive_audio will move the HUD to SPEAKING/LISTENING.
+
+    async def _send_native_audio_turn(self, data: bytes) -> None:
+        """Fallback: send one buffered utterance to Live as PCM audio."""
+        if not data or self.out_queue is None:
+            return
+        slice_bytes = CHUNK_SIZE * 2
+        for start in range(0, len(data), slice_bytes):
+            self._enqueue_realtime_audio({
+                "data": data[start:start + slice_bytes],
+                "mime_type": INPUT_AUDIO_MIME,
+            }, remember=False)
+        self._enqueue_realtime_audio({"audio_stream_end": True}, remember=False)
+
+    def _transcribe_voice_audio(self, data: bytes) -> str:
+        """Turn one buffered PCM utterance into the text command JARVIS receives.
+
+        Prefer the optional local Whisper engine, then use the same Gemini API key
         with a small multimodal transcription request. Either result is forwarded
-        back through ``send_client_content`` so the assistant receives ordinary
-        text and can run tools reliably.
+        through ``send_client_content`` so the assistant receives ordinary text
+        and can run tools reliably.
         """
-        if len(data) < int(SEND_SAMPLE_RATE * 2 * 0.18):
+        if len(data) < int(SEND_SAMPLE_RATE * 2 * _MIN_VOICE_TURN_SECONDS):
             return ""
 
         if not self._stt_attempted:
@@ -1166,41 +1292,55 @@ class JarvisLive:
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
-            if jarvis_speaking or self.ui.muted or self._phone_active:
-                self._voice_speech_active = False
+            if jarvis_speaking or self.ui.muted:
+                if self._voice_text_first:
+                    loop.call_soon_threadsafe(self._reset_voice_capture)
+                else:
+                    self._voice_speech_active = False
+                return
+            if self._phone_active:
+                # The phone relay owns the shared text buffer while it is active.
+                # Do not append desktop silence or overwrite its turn boundary.
+                if not self._voice_text_first:
+                    self._voice_speech_active = False
                 return
 
             data = indata.tobytes()
-            # Never call Queue.put_nowait directly from the PortAudio
-            # callback: QueueFull would become an unhandled event-loop
-            # exception and silently lose the user's turn.
+            try:
+                level = _pcm_level(indata)
+                self.ui.set_audio_level(level)
+            except Exception:
+                level = 0.0
+            now = time.monotonic()
+
+            # In text-first mode the PCM is held locally until the utterance is
+            # complete. That guarantees the exact transcript is what enters the
+            # Live session, instead of racing Gemini's audio VAD.
+            if self._voice_text_first:
+                loop.call_soon_threadsafe(
+                    self._handle_desktop_text_frame, data, level, now
+                )
+                return
+
+            # Native mode remains available as the fallback switch: stream every
+            # frame to Live and explicitly flush its VAD after local silence.
+            # Never call Queue.put_nowait directly from the PortAudio callback.
             loop.call_soon_threadsafe(
                 self._enqueue_realtime_audio,
                 {"data": data, "mime_type": INPUT_AUDIO_MIME}
             )
-
-            # Feed the live mic level to the HUD and keep a tiny local VAD
-            # watchdog. Live's VAD remains authoritative, but explicitly ending
-            # a desktop stream after real silence flushes short commands on
-            # model/SDK versions that otherwise wait forever for turn_complete.
-            try:
-                level = _pcm_level(indata)
-                self.ui.set_audio_level(level)
-                now = time.monotonic()
-                if level > 0.01:
-                    self._voice_speech_active = True
-                    self._voice_last_activity = now
-                elif (
-                    self._voice_speech_active
-                    and now - self._voice_last_activity >= _LOCAL_SILENCE_SECONDS
-                ):
-                    self._voice_speech_active = False
-                    loop.call_soon_threadsafe(
-                        self._enqueue_realtime_audio,
-                        {"audio_stream_end": True},
-                    )
-            except Exception:
-                pass
+            if level > 0.01:
+                self._voice_speech_active = True
+                self._voice_last_activity = now
+            elif (
+                self._voice_speech_active
+                and now - self._voice_last_activity >= _LOCAL_SILENCE_SECONDS
+            ):
+                self._voice_speech_active = False
+                loop.call_soon_threadsafe(
+                    self._enqueue_realtime_audio,
+                    {"audio_stream_end": True},
+                )
 
         try:
             def _open_mic(dev):
@@ -1766,7 +1906,7 @@ class JarvisLive:
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
     async def _relay_phone_audio(self) -> None:
-        """Forward phone mic PCM chunks from dashboard queue into the Gemini Live session."""
+        """Buffer phone PCM, then transcribe and submit it as a text turn."""
         q = self._dashboard._phone_audio_queue
         while True:
             try:
@@ -1776,17 +1916,36 @@ class JarvisLive:
                 self._phone_active = False
                 continue
             if chunk.get("audio_stream_end"):
-                # The browser stopped sending. Flush Live's cached VAD audio
-                # before handing the microphone back to the desktop stream.
+                # The browser stopped sending. In text-first mode this is the
+                # phone's end-of-utterance signal; native audio remains the
+                # fallback mode for older deployments.
                 self._phone_active = False
-                self._enqueue_realtime_audio(chunk)
+                if self._voice_text_first:
+                    if self._phone_voice_open:
+                        self._phone_voice_open = False
+                        self._finish_voice_turn()
+                    else:
+                        # An empty/stopped phone stream must not flush a partial
+                        # desktop turn that happened to be in the shared buffer.
+                        self._reset_voice_capture()
+                else:
+                    self._enqueue_realtime_audio(chunk)
                 continue
 
             self._phone_active = True   # phone is streaming — silence PC mic
             with self._speaking_lock:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
-                self._enqueue_realtime_audio(chunk)
+                if self._voice_text_first:
+                    if not self._phone_voice_open:
+                        # A phone utterance gets its own turn, never a mixture of
+                        # stale desktop audio and browser PCM.
+                        self._reset_voice_capture()
+                        self._phone_voice_open = True
+                        self._voice_capture_source = "phone"
+                    self._remember_voice_audio(chunk.get("data", b""))
+                else:
+                    self._enqueue_realtime_audio(chunk)
 
     def _on_phone_connected(self) -> None:
         self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
@@ -1891,6 +2050,7 @@ class JarvisLive:
                     self._audio_drop_log_at = 0.0
                     self._mic_status_log_at = 0.0
                     self._turn_done_event = asyncio.Event()
+                    self._voice_turn_queue = asyncio.Queue()
 
                     # Reset transient state that must not carry over from a previous session
                     self._pending_vision       = None
@@ -1900,6 +2060,9 @@ class JarvisLive:
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
                     self._voice_audio_buffer.clear()
+                    self._voice_prebuffer.clear()
+                    self._voice_capture_source = None
+                    self._phone_voice_open     = False
                     self._voice_speech_active  = False
                     self._voice_last_activity  = 0.0
 
@@ -1929,6 +2092,7 @@ class JarvisLive:
                     tg.create_task(self._watch_reconnect())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
+                    tg.create_task(self._process_voice_turns())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
                     tg.create_task(self._run_system_monitor())
