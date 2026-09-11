@@ -106,6 +106,7 @@ _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
 _LOCAL_SILENCE_SECONDS = 0.78  # flush a desktop voice turn after quiet speech
 _MIN_VOICE_TURN_SECONDS = 0.08  # keep short words such as "yes" and "stop"
+_VOICE_ACTIVITY_LEVEL = 0.002  # lower gate for quiet microphones (about 65 RMS)
 # Text-first voice turns make the command path deterministic: capture a complete
 # utterance, transcribe it, then submit the exact text to the existing Live
 # session. Native audio remains the fallback if transcription is unavailable.
@@ -449,6 +450,9 @@ class JarvisLive:
         self._transcribe_client  = None
         self._voice_speech_active = False
         self._voice_last_activity = 0.0
+        self._mic_callback_seen  = False
+        self._mic_signal_seen    = False
+        self._mic_gate_logged    = False
         self._voice_text_first   = VOICE_TEXT_FIRST
         self._voice_turn_queue   = None
 
@@ -784,7 +788,7 @@ class JarvisLive:
         """Apply desktop VAD on the event loop and retain only one speech turn."""
         if not data:
             return
-        if level > 0.01:
+        if level > _VOICE_ACTIVITY_LEVEL:
             if not self._voice_speech_active:
                 # Start a fresh turn, retaining only the short pre-speech tail.
                 self._voice_audio_buffer.clear()
@@ -820,6 +824,8 @@ class JarvisLive:
         # command because Whisper or the network is slow defeats the whole
         # text-first recovery path.
         queue.put_nowait(data)
+        print(f"[JARVIS] 🎤 Voice turn captured ({len(data):,} bytes); transcribing")
+        self.ui.write_log("SYS: Voice turn captured; transcribing.")
         self.ui.set_state("PROCESSING")
 
     async def _process_voice_turns(self) -> None:
@@ -1268,6 +1274,11 @@ class JarvisLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            if not self._mic_callback_seen:
+                self._mic_callback_seen = True
+                print("[JARVIS] 🎤 Mic callback is receiving frames")
+                self.ui.write_log("SYS: Microphone callback is receiving frames.")
+
             if status:
                 # PortAudio can report an input overflow without stopping the
                 # stream. Surface it occasionally instead of making a missed
@@ -1286,6 +1297,12 @@ class JarvisLive:
             # only a queue push, so the audio path is never slowed. When wake word
             # is off (default) or we're awake, this is a single boolean check.
             if self._wake_enabled and not self._awake:
+                if not self._mic_gate_logged:
+                    self._mic_gate_logged = True
+                    print("[JARVIS] Mic is gated while asleep — say 'Hey Jarvis' or tap WAKE NOW")
+                    self.ui.write_log(
+                        "SYS: Microphone is gated while asleep — say 'Hey Jarvis' or tap WAKE NOW."
+                    )
                 det = self._wake_detector
                 if det is not None:
                     det.feed(indata)
@@ -1309,6 +1326,12 @@ class JarvisLive:
             try:
                 level = _pcm_level(indata)
                 self.ui.set_audio_level(level)
+                if level > 0.0 and not self._mic_signal_seen:
+                    self._mic_signal_seen = True
+                    print(f"[JARVIS] 🎤 Mic signal detected (level={level:.3f})")
+                    self.ui.write_log(
+                        f"SYS: Microphone signal detected (level {level:.3f})."
+                    )
             except Exception:
                 level = 0.0
             now = time.monotonic()
@@ -1329,7 +1352,7 @@ class JarvisLive:
                 self._enqueue_realtime_audio,
                 {"data": data, "mime_type": INPUT_AUDIO_MIME}
             )
-            if level > 0.01:
+            if level > _VOICE_ACTIVITY_LEVEL:
                 self._voice_speech_active = True
                 self._voice_last_activity = now
             elif (
@@ -2065,6 +2088,9 @@ class JarvisLive:
                     self._phone_voice_open     = False
                     self._voice_speech_active  = False
                     self._voice_last_activity  = 0.0
+                    self._mic_callback_seen     = False
+                    self._mic_signal_seen       = False
+                    self._mic_gate_logged       = False
 
                     print("[JARVIS] Connected.")
                     if _resumed_with:
