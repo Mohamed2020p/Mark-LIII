@@ -104,6 +104,7 @@ INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
 # the bars still move for a quiet talker — language- and device-independent.
 _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
+_LOCAL_SILENCE_SECONDS = 0.78  # flush a desktop voice turn after quiet speech
 
 
 def _pcm_level(samples) -> float:
@@ -138,10 +139,37 @@ def _load_system_prompt() -> str:
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
-def _clean_transcript(text: str) -> str:    
+def _clean_transcript(text: str) -> str:
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
     return text.strip()
+
+
+def _merge_transcript_text(current: str, incoming: str) -> str:
+    """Merge streaming transcript updates without duplicating cumulative text.
+
+    Live transcription implementations have returned both deltas ("open the")
+    and cumulative updates ("open the browser") across SDK/model revisions.
+    Joining every update blindly makes commands unreadable and can change their
+    meaning, so accept either shape here.
+    """
+    current = _clean_transcript(current or "")
+    incoming = _clean_transcript(incoming or "")
+    if not incoming:
+        return current
+    if not current:
+        return incoming
+    if incoming == current or current.endswith(incoming):
+        return current
+    if incoming.startswith(current):
+        return incoming
+
+    # Preserve a partial overlap when one update ends where the next begins.
+    max_overlap = min(len(current), len(incoming), 96)
+    for size in range(max_overlap, 0, -1):
+        if current[-size:].casefold() == incoming[:size].casefold():
+            return f"{current} {incoming[size:]}".strip()
+    return f"{current} {incoming}".strip()
 
 TOOL_DECLARATIONS = [
     # ── Inline tools ─────────────────────────────────────────────────────────
@@ -400,6 +428,20 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+
+        # Keep a bounded copy of the microphone turn for the text-forwarding
+        # fallback. Normally Gemini Live supplies input_audio_transcription and
+        # the audio turn proceeds natively; if a model/SDK revision returns a
+        # turn without a usable transcript or response, the optional local STT
+        # engine can recover the words and send them as ordinary text.
+        self._voice_audio_buffer = bytearray()
+        self._voice_audio_limit  = SEND_SAMPLE_RATE * 2 * 30  # 30 s, mono int16
+        self._stt_engine         = None
+        self._stt_attempted      = False
+        self._stt_warned         = False
+        self._transcribe_client  = None
+        self._voice_speech_active = False
+        self._voice_last_activity = 0.0
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
 
@@ -668,6 +710,10 @@ class JarvisLive:
         queue = self.out_queue
         if queue is None:
             return
+        if message.get("data"):
+            self._remember_voice_audio(message["data"])
+        elif message.get("audio_stream_end"):
+            self.ui.set_state("PROCESSING")
         try:
             queue.put_nowait(message)
             return
@@ -684,12 +730,111 @@ class JarvisLive:
                 self.ui.write_log(
                     f"SYS: Audio link is catching up ({self._audio_drop_count} old frames skipped)."
                 )
-        except asyncio.QueueEmpty:
-            # A sender may have freed the slot between the two operations.
+        except (asyncio.QueueEmpty, asyncio.QueueFull):
+            # A sender may have freed the slot between the two operations, or
+            # refilled it between get/put. Never let either race escape from
+            # the audio callback's event-loop handoff.
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
                 pass
+
+    def _remember_voice_audio(self, data: bytes) -> None:
+        """Keep only the current bounded PCM turn for optional STT recovery."""
+        if not data:
+            return
+        self._voice_audio_buffer.extend(data)
+        if len(self._voice_audio_buffer) > self._voice_audio_limit:
+            del self._voice_audio_buffer[:-self._voice_audio_limit]
+
+    def _take_voice_audio(self) -> bytes:
+        data = bytes(self._voice_audio_buffer)
+        self._voice_audio_buffer.clear()
+        return data
+
+    def _transcribe_voice_audio(self, data: bytes) -> str:
+        """Recover a command as text when a Live audio turn is silent.
+
+        The normal path is still Gemini Live audio. A failed audio turn first
+        tries an optional local Whisper engine, then uses the same Gemini API key
+        with a small multimodal transcription request. Either result is forwarded
+        back through ``send_client_content`` so the assistant receives ordinary
+        text and can run tools reliably.
+        """
+        if len(data) < int(SEND_SAMPLE_RATE * 2 * 0.18):
+            return ""
+
+        if not self._stt_attempted:
+            self._stt_attempted = True
+            try:
+                from core.stt import WhisperSTT
+                self._stt_engine = WhisperSTT(model_name="base", language="auto")
+                self.ui.write_log("SYS: Local voice transcription fallback ready.")
+            except Exception as exc:
+                self._stt_engine = None
+                if not self._stt_warned:
+                    self._stt_warned = True
+                    print(f"[STT] Optional local fallback unavailable: {exc}")
+
+        if self._stt_engine is not None:
+            try:
+                samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                text = _clean_transcript(self._stt_engine.transcribe(samples))
+                if text:
+                    return text
+            except Exception as exc:
+                print(f"[STT] Local voice fallback failed: {exc}")
+
+        # No optional local engine, or it returned no words: use a normal Gemini
+        # text-generation request only for this failed turn. PCM is wrapped in a
+        # WAV container because standard multimodal models accept WAV reliably.
+        try:
+            import io
+            import wave
+
+            wav = io.BytesIO()
+            with wave.open(wav, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(SEND_SAMPLE_RATE)
+                wav_file.writeframes(data)
+
+            if self._transcribe_client is None:
+                self._transcribe_client = genai.Client(
+                    api_key=_get_api_key(),
+                    http_options={"api_version": "v1beta"},
+                )
+            response = self._transcribe_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_bytes(data=wav.getvalue(), mime_type="audio/wav"),
+                        types.Part.from_text(text=(
+                            "Transcribe the user's speech exactly as a command. "
+                            "Return only the spoken words, with no quotes, explanation, "
+                            "or answer. Preserve the user's language."
+                        )),
+                    ],
+                )],
+            )
+            return _clean_transcript(getattr(response, "text", "") or "")
+        except Exception as exc:
+            print(f"[STT] Gemini transcription fallback failed: {exc}")
+            return ""
+
+    async def _forward_voice_transcript(self, text: str) -> None:
+        """Forward recovered speech as a normal text turn, exactly like typing."""
+        text = _clean_transcript(text)
+        if not text or not self.session:
+            return
+        self._last_user_speech = time.monotonic()
+        print(f"[JARVIS] 📝 Forwarding voice transcript: {text}")
+        self.ui.write_log("SYS: Voice transcript forwarded to JARVIS as text.")
+        await self.session.send_client_content(
+            turns={"role": "user", "parts": [{"text": text}]},
+            turn_complete=True,
+        )
 
     def speak(self, text: str):
         if not self._loop or not self.session:
@@ -752,10 +897,25 @@ class JarvisLive:
             parts.append(mem_str)
         parts.append(sys_prompt)
 
+        # Ask Live for an explicit, cleaned user transcript. The transcript is
+        # used for the activity log and as a text-forwarding fallback when an
+        # audio turn reaches completion without a response. Keep the empty-dict
+        # fallback for older google-genai builds that predate this type.
+        _tx_type = getattr(types, "AudioTranscriptionConfig", None)
+        if _tx_type is not None:
+            _tx_kwargs = {}
+            _tx_mode = getattr(types, "AudioTranscriptionConfigMode", None)
+            if _tx_mode is not None and hasattr(_tx_mode, "SMART"):
+                _tx_kwargs["mode"] = _tx_mode.SMART
+            _input_tx  = _tx_type(**_tx_kwargs)
+            _output_tx = _tx_type()
+        else:
+            _input_tx = _output_tx = {}
+
         cfg = dict(
             response_modalities=["AUDIO"],
-            output_audio_transcription={},
-            input_audio_transcription={},
+            output_audio_transcription=_output_tx,
+            input_audio_transcription=_input_tx,
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": (
                 TOOL_DECLARATIONS
@@ -1006,22 +1166,41 @@ class JarvisLive:
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted and not self._phone_active:
-                data = indata.tobytes()
-                # Never call Queue.put_nowait directly from the PortAudio
-                # callback: QueueFull would become an unhandled event-loop
-                # exception and silently lose the user's turn.
-                loop.call_soon_threadsafe(
-                    self._enqueue_realtime_audio,
-                    {"data": data, "mime_type": INPUT_AUDIO_MIME}
-                )
-                # Feed the live mic level to the HUD so the waveform reacts to
-                # the user's actual voice while listening. Purely cosmetic — any
-                # failure here must never disturb the mic.
-                try:
-                    self.ui.set_audio_level(_pcm_level(indata))
-                except Exception:
-                    pass
+            if jarvis_speaking or self.ui.muted or self._phone_active:
+                self._voice_speech_active = False
+                return
+
+            data = indata.tobytes()
+            # Never call Queue.put_nowait directly from the PortAudio
+            # callback: QueueFull would become an unhandled event-loop
+            # exception and silently lose the user's turn.
+            loop.call_soon_threadsafe(
+                self._enqueue_realtime_audio,
+                {"data": data, "mime_type": INPUT_AUDIO_MIME}
+            )
+
+            # Feed the live mic level to the HUD and keep a tiny local VAD
+            # watchdog. Live's VAD remains authoritative, but explicitly ending
+            # a desktop stream after real silence flushes short commands on
+            # model/SDK versions that otherwise wait forever for turn_complete.
+            try:
+                level = _pcm_level(indata)
+                self.ui.set_audio_level(level)
+                now = time.monotonic()
+                if level > 0.01:
+                    self._voice_speech_active = True
+                    self._voice_last_activity = now
+                elif (
+                    self._voice_speech_active
+                    and now - self._voice_last_activity >= _LOCAL_SILENCE_SECONDS
+                ):
+                    self._voice_speech_active = False
+                    loop.call_soon_threadsafe(
+                        self._enqueue_realtime_audio,
+                        {"audio_stream_end": True},
+                    )
+            except Exception:
+                pass
 
         try:
             def _open_mic(dev):
@@ -1067,7 +1246,9 @@ class JarvisLive:
 
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
-        out_buf, in_buf = [], []
+        out_buf, in_buf = "", ""
+        turn_had_output_audio = False
+        turn_had_tool_call    = False
 
         try:
             while True:
@@ -1086,10 +1267,16 @@ class JarvisLive:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
 
+                    # Record the response shape before handling server content;
+                    # a tool-call turn can legitimately contain no output audio.
+                    if response.tool_call:
+                        turn_had_tool_call = True
+
                     if response.data:
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
+                            turn_had_output_audio = True
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
@@ -1103,14 +1290,15 @@ class JarvisLive:
                         sc = response.server_content
 
                         if sc.output_transcription and sc.output_transcription.text:
-                            txt = _clean_transcript(sc.output_transcription.text)
-                            if txt and txt != (out_buf[-1] if out_buf else ""):
-                                out_buf.append(txt)
+                            out_buf = _merge_transcript_text(
+                                out_buf, sc.output_transcription.text
+                            )
 
                         if sc.input_transcription and sc.input_transcription.text:
-                            txt = _clean_transcript(sc.input_transcription.text)
-                            if txt:
-                                in_buf.append(txt)
+                            in_buf = _merge_transcript_text(
+                                in_buf, sc.input_transcription.text
+                            )
+                            if in_buf:
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
@@ -1121,11 +1309,38 @@ class JarvisLive:
                             # flag and skip all further processing for that turn.
                             if self._interrupted:
                                 self._interrupted = False
-                                in_buf  = []
-                                out_buf = []
+                                in_buf  = ""
+                                out_buf = ""
+                                turn_had_output_audio = False
+                                turn_had_tool_call = False
+                                self._take_voice_audio()
                                 continue
 
-                            full_in = " ".join(in_buf).strip()
+                            full_in  = _clean_transcript(in_buf)
+                            full_out = _clean_transcript(out_buf)
+                            voice_audio = b""
+
+                            # If Live completed an audio turn without returning
+                            # input transcription, recover the bounded PCM turn
+                            # with optional local STT. This is deliberately only
+                            # attempted when Live also produced no answer, so a
+                            # normal native-audio response can never be doubled.
+                            if (
+                                not full_in
+                                and not full_out
+                                and not turn_had_output_audio
+                                and not turn_had_tool_call
+                            ):
+                                voice_audio = self._take_voice_audio()
+                                if voice_audio:
+                                    full_in = await asyncio.to_thread(
+                                        self._transcribe_voice_audio, voice_audio
+                                    )
+                            else:
+                                # The audio was already handled by Live; do not
+                                # let it leak into the next text turn.
+                                self._take_voice_audio()
+
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
@@ -1135,9 +1350,7 @@ class JarvisLive:
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
                                     }))
-                            in_buf = []
 
-                            full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
@@ -1147,7 +1360,26 @@ class JarvisLive:
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
-                            out_buf = []
+
+                            # A transcript without a model response is not lost:
+                            # forward it through the same text path as a typed
+                            # command. This is the key recovery for a Live model
+                            # that heard audio but failed to produce a turn.
+                            if (
+                                full_in
+                                and not full_out
+                                and not turn_had_output_audio
+                                and not turn_had_tool_call
+                            ):
+                                try:
+                                    await self._forward_voice_transcript(full_in)
+                                except Exception as exc:
+                                    print(f"[STT] Could not forward transcript: {exc}")
+
+                            in_buf = ""
+                            out_buf = ""
+                            turn_had_output_audio = False
+                            turn_had_tool_call = False
 
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
@@ -1667,6 +1899,9 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._voice_audio_buffer.clear()
+                    self._voice_speech_active  = False
+                    self._voice_last_activity  = 0.0
 
                     print("[JARVIS] Connected.")
                     if _resumed_with:
