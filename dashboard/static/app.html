@@ -300,6 +300,16 @@
       .form-grid { grid-template-columns:1fr; }
       .form-field.full { grid-column:auto; }
     }
+    @media (max-width:420px) {
+      .topbar { gap:6px; }
+      .connection { flex:1; }
+      .composer { gap:6px; padding:8px; }
+      .attach-btn, .mic-btn { width:34px; height:38px; }
+      .send-btn { width:40px; padding:0; font-size:0; }
+      .send-btn::after { content:"↗"; font-size:16px; }
+      .prompt { font-size:12px; padding-left:2px; padding-right:2px; }
+      .hero-card { min-height:365px; }
+    }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
     }
@@ -328,6 +338,8 @@
           <button class="nav-btn" type="button" data-target="activity" onclick="selectView(this, 'activity')"><span class="nav-icon">◌</span> Activity</button>
           <button class="nav-btn" type="button" data-target="media" onclick="selectView(this, 'media')"><span class="nav-icon">✦</span> Media Studio</button>
           <button class="nav-btn" type="button" data-target="integrations" onclick="selectView(this, 'integrations')"><span class="nav-icon">◈</span> Integrations</button>
+          <button class="nav-btn" type="button" data-target="memory" onclick="selectView(this, 'memory')"><span class="nav-icon">⌘</span> Memory</button>
+          <button class="nav-btn" type="button" data-target="plugins" onclick="selectView(this, 'plugins')"><span class="nav-icon">◇</span> Plugins</button>
           <button class="nav-btn" type="button" data-target="files" onclick="selectView(this, 'files')"><span class="nav-icon">□</span> File relay</button>
         </nav>
         <div class="rail-card">
@@ -349,6 +361,8 @@
               <button class="quick-btn" type="button" onclick="quickCommand('Search the latest news and give me the three most important headlines.')">News pulse</button>
               <button class="quick-btn" type="button" onclick="quickCommand('Open a relaxing YouTube video for me.')">Find a video</button>
               <button class="quick-btn" type="button" onclick="quickCommand('Create an image of a cinematic neon city at night.')">Create image</button>
+              <button class="quick-btn" type="button" onclick="quickCommand('Show me what you remember about my preferences and recent work.')">Recall memory</button>
+              <button class="quick-btn" type="button" onclick="quickCommand('List the available plugins and what each one can do.')">Open plugins</button>
             </div>
           </div>
           <div class="orb-stage" aria-hidden="true">
@@ -400,6 +414,8 @@
             <div class="skill"><b>Recall</b>Persistent memory</div>
             <div class="skill"><b>Media</b>Image + video</div>
             <div class="skill"><b>Automation</b>Apps + files</div>
+            <div class="skill"><b>Memory</b>Recall + preferences</div>
+            <div class="skill"><b>Plugins</b>Extend the core</div>
           </div>
         </section>
       </aside>
@@ -614,7 +630,17 @@
     async function testTwilio() { const status=document.getElementById('tw-modal-status'); status.textContent='Testing credentials…'; try { const response=await _authFetch('/api/twilio/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(twilioBody())}); const data=await response.json(); status.textContent=data.message || (data.ok?'Connection ready.':'Test failed.'); status.style.color=data.ok?'var(--green)':'var(--red)'; } catch (_) { status.textContent='Test request failed.'; status.style.color='var(--red)'; } }
     async function saveTwilio() { const status=document.getElementById('tw-modal-status'); status.textContent='Saving locally…'; try { const response=await _authFetch('/api/twilio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(twilioBody())}); const data=await response.json(); if(!response.ok) throw new Error(data.error || 'Save failed'); updateTwilio(data); status.style.color='var(--green)'; status.textContent='Saved. Calls still require desktop confirmation.'; toast('Twilio bridge saved'); setTimeout(closeSettings,900); } catch (error) { status.style.color='var(--red)'; status.textContent=error.message; } }
 
-    function selectView(button, target) { document.querySelectorAll('.nav-btn').forEach(btn=>btn.classList.remove('active')); button.classList.add('active'); if(target==='integrations'){openSettings();return;} const el=document.getElementById(`${target}-view`) || document.getElementById('activity-view'); el.scrollIntoView({behavior:'smooth',block:'start'}); if(target==='media') toast('Media Studio: ask for an image or short video below'); if(target==='files') toast('Attach a file with ＋ to relay it to your desktop'); }
+    function selectView(button, target) {
+      document.querySelectorAll('.nav-btn').forEach(btn=>btn.classList.remove('active'));
+      button.classList.add('active');
+      if(target==='integrations'){openSettings();return;}
+      if(target==='memory'){quickCommand('Show me what you remember about my preferences and recent work.');return;}
+      if(target==='plugins'){quickCommand('List the available plugins and what each one can do.');return;}
+      const el=document.getElementById(`${target}-view`) || document.getElementById('activity-view');
+      el.scrollIntoView({behavior:'smooth',block:'start'});
+      if(target==='media') toast('Media Studio: ask for an image or short video below');
+      if(target==='files') toast('Attach a file with ＋ to relay it to your desktop');
+    }
     let _toastTimer; function toast(message) { const el=document.getElementById('toast'); el.textContent=message; el.classList.add('show'); clearTimeout(_toastTimer); _toastTimer=setTimeout(()=>el.classList.remove('show'),2800); }
     setInterval(refreshOverview, 8000); refreshOverview();
     window.addEventListener('beforeunload',()=>{_manualClose=true;if(_socket) _socket.close();stopVoice();});
