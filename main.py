@@ -1447,7 +1447,18 @@ class JarvisLive:
                             _audio_data = response.data
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
-                                self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
+                                _audio_chunk = _audio_data[_i : _i + _SLICE]
+                                self.audio_in_queue.put_nowait(_audio_chunk)
+                                # The remote dashboard can opt into hearing the
+                                # same PCM response through its browser speaker.
+                                # Keep this out of the dashboard history; it is
+                                # a live stream, not a replayable chat event.
+                                if self._dashboard:
+                                    asyncio.create_task(
+                                        self._dashboard.broadcast_audio(
+                                            _audio_chunk, RECEIVE_SAMPLE_RATE
+                                        )
+                                    )
 
                     if response.server_content:
                         sc = response.server_content

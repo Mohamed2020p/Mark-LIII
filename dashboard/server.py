@@ -1,8 +1,9 @@
 """
 dashboard/server.py — JARVIS Local HTTP Dashboard
 
-Plain HTTP on port 8000 (no SSL warnings, no firewall issues).
-Security at the application layer: AES-256-CBC with session-key-derived key.
+Local HTTPS on port 8000 when the dashboard can create its ignored self-signed
+certificate; otherwise plain HTTP remains available. Security at the application
+layer: AES-256-CBC with session-key-derived key.
 CryptoJS is auto-downloaded once and served locally — no CDN needed after that.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
@@ -384,9 +385,17 @@ class DashboardServer:
         # A short network hiccup should buffer audio instead of dropping the
         # user's words. The relay keeps only the active phone turn in memory.
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=500)
+        self._audio_broadcast_lock        = asyncio.Lock()
+        self._audio_sequence              = 0
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
+        # A browser microphone on a phone requires a secure context. Generate a
+        # local certificate once, outside Git, so the QR dashboard can offer
+        # HTTPS without asking the user to configure OpenSSL by hand.
+        if _DEPS_OK:
+            self._ensure_tls_certificate(self._ip)
+
         # Keep the rest of JARVIS bootable when the optional dashboard packages
         # are not installed; serve() will emit the existing install hint.
         self.app                          = self._build_app() if _DEPS_OK else None
@@ -399,6 +408,72 @@ class DashboardServer:
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
         self._pending_keys[key] = now + expiry_secs
         return key
+
+    @staticmethod
+    def _ensure_tls_certificate(ip: str) -> bool:
+        """Create a local, IP-addressed certificate for browser microphone access.
+
+        The certificate is deliberately self-signed and stored under the ignored
+        ``config/certs`` directory. The user accepts the browser warning once;
+        after that getUserMedia and browser speaker playback work over the LAN.
+        If cryptography is unavailable, the dashboard safely falls back to HTTP.
+        """
+        cert_dir = BASE_DIR / "config" / "certs"
+        key_path = cert_dir / "jarvis.key"
+        crt_path = cert_dir / "jarvis.crt"
+        if key_path.exists() and crt_path.exists():
+            return True
+        try:
+            import datetime as _dt
+            import ipaddress
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.x509.oid import NameOID
+
+            cert_dir.mkdir(parents=True, exist_ok=True)
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            now = _dt.datetime.now(_dt.timezone.utc)
+            names = [x509.DNSName("localhost")]
+            try:
+                names.insert(0, x509.IPAddress(ipaddress.ip_address(ip)))
+            except ValueError:
+                names.insert(0, x509.DNSName(ip))
+            try:
+                names.append(x509.DNSName(socket.gethostname()))
+            except Exception:
+                pass
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "JARVIS Local Dashboard"),
+                x509.NameAttribute(NameOID.COMMON_NAME, ip),
+            ])
+            cert = (
+                x509.CertificateBuilder()
+                .subject_name(subject)
+                .issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(now - _dt.timedelta(minutes=1))
+                .not_valid_after(now + _dt.timedelta(days=825))
+                .add_extension(x509.SubjectAlternativeName(names), critical=False)
+                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                .sign(key, hashes.SHA256())
+            )
+            key_path.write_bytes(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ))
+            crt_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            try:
+                key_path.chmod(0o600)
+            except OSError:
+                pass
+            print(f"[Dashboard] Local HTTPS certificate created: {crt_path}")
+            return True
+        except Exception as exc:
+            print(f"[Dashboard] HTTPS certificate unavailable ({exc}); using HTTP.")
+            return False
 
     @staticmethod
     def _ssl_enabled() -> bool:
@@ -439,10 +514,11 @@ class DashboardServer:
 
     # ── broadcast ────────────────────────────────────────────────────────
 
-    async def broadcast(self, msg: dict) -> None:
-        self._history.append(msg)
-        if len(self._history) > 300:
-            self._history = self._history[-300:]
+    async def broadcast(self, msg: dict, *, remember: bool = True) -> None:
+        if remember:
+            self._history.append(msg)
+            if len(self._history) > 300:
+                self._history = self._history[-300:]
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             try:
@@ -450,6 +526,19 @@ class DashboardServer:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    async def broadcast_audio(self, data: bytes, sample_rate: int = 24000) -> None:
+        """Stream response PCM to paired browsers without polluting event history."""
+        if not data or not self._clients:
+            return
+        async with self._audio_broadcast_lock:
+            self._audio_sequence += 1
+            await self.broadcast({
+                "type": "audio",
+                "seq": self._audio_sequence,
+                "sample_rate": int(sample_rate),
+                "data": base64.b64encode(data).decode("ascii"),
+            }, remember=False)
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 

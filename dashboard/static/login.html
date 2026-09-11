@@ -2,16 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#060916">
   <title>JARVIS // Pair Device</title>
   <style>
     *, *::before, *::after { box-sizing:border-box; }
     :root { --bg:#060916; --text:#eef4ff; --muted:#8490ad; --line:rgba(139,174,255,.16); --cyan:#69e7ff; --violet:#c487ff; --green:#65f2bc; }
-    html,body { min-height:100%; margin:0; }
-    body { min-height:100vh; display:grid; place-items:center; padding:22px; overflow:hidden; color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; background:radial-gradient(circle at 72% 20%,rgba(116,105,255,.2),transparent 30rem),radial-gradient(circle at 12% 88%,rgba(45,214,255,.12),transparent 25rem),var(--bg); }
+    html,body { min-height:100%; margin:0; -webkit-text-size-adjust:100%; }
+    body { min-height:100dvh; display:grid; place-items:center; padding:clamp(16px,4vw,32px); overflow-x:hidden; overflow-y:auto; color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; background:radial-gradient(circle at 72% 20%,rgba(116,105,255,.2),transparent 30rem),radial-gradient(circle at 12% 88%,rgba(45,214,255,.12),transparent 25rem),var(--bg); }
     body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.30; background-image:linear-gradient(rgba(137,158,255,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(137,158,255,.045) 1px,transparent 1px); background-size:42px 42px; mask-image:linear-gradient(to bottom,black,transparent 92%); }
-    .shell { width:min(920px,100%); display:grid; grid-template-columns:minmax(0,1fr) 390px; gap:36px; align-items:center; position:relative; z-index:1; }
+    .shell { width:min(920px,100%); display:grid; grid-template-columns:minmax(0,1fr) 390px; gap:clamp(24px,5vw,52px); align-items:center; position:relative; z-index:1; }
     .intro { padding:10px 0; }
     .orb-wrap { position:relative; width:min(300px,72vw); aspect-ratio:1; margin-bottom:22px; display:grid; place-items:center; }
     .orb-wrap::before,.orb-wrap::after { content:""; position:absolute; border:1px solid rgba(105,231,255,.24); border-radius:50%; transform:rotate(-20deg); }
@@ -26,7 +26,7 @@
     .intro-copy { max-width:480px; margin:0; color:var(--muted); font-size:13px; line-height:1.7; }
     .feature-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:22px; }
     .feature { padding:8px 10px; border:1px solid var(--line); border-radius:99px; color:var(--muted); background:rgba(255,255,255,.035); font-size:10px; }
-    .card { padding:27px; border:1px solid rgba(105,231,255,.25); border-radius:24px; background:rgba(15,24,49,.82); box-shadow:0 28px 90px rgba(0,0,0,.45),0 0 40px rgba(105,231,255,.06); backdrop-filter:blur(22px); }
+    .card { width:100%; padding:clamp(21px,4vw,30px); border:1px solid rgba(105,231,255,.25); border-radius:24px; background:rgba(15,24,49,.82); box-shadow:0 28px 90px rgba(0,0,0,.45),0 0 40px rgba(105,231,255,.06); backdrop-filter:blur(22px); }
     .card-head { display:flex; align-items:center; gap:11px; margin-bottom:24px; }
     .mark { width:38px; height:38px; display:grid; place-items:center; border-radius:13px; color:#071020; font-weight:900; font-size:19px; background:linear-gradient(140deg,var(--cyan),#9295ff,var(--violet)); box-shadow:0 0 24px rgba(105,231,255,.25); }
     .brand { font-size:16px; font-weight:850; letter-spacing:.25em; }
@@ -36,14 +36,15 @@
     .key-input::placeholder { color:rgba(132,144,173,.45); letter-spacing:.22em; font-size:18px; }
     .key-input:focus { border-color:var(--cyan); box-shadow:0 0 0 4px rgba(105,231,255,.10); }
     .err { min-height:19px; margin-top:10px; color:#ff7c9d; font-size:11px; }
-    .btn { width:100%; padding:13px; border:0; border-radius:12px; color:#071020; background:linear-gradient(120deg,var(--cyan),#a9a2ff); cursor:pointer; font-size:10px; font-weight:900; letter-spacing:.20em; transition:.2s; }
+    .btn { width:100%; min-height:46px; padding:13px; border:0; border-radius:12px; color:#071020; background:linear-gradient(120deg,var(--cyan),#a9a2ff); cursor:pointer; font-size:10px; font-weight:900; letter-spacing:.20em; transition:.2s; touch-action:manipulation; }
     .btn:hover { filter:brightness(1.08); transform:translateY(-1px); }
     .security { display:flex; gap:9px; margin-top:17px; padding-top:15px; border-top:1px solid var(--line); color:var(--muted); font-size:10px; line-height:1.5; }
     .security strong { color:var(--green); font-size:14px; }
     #reconnecting { display:none; margin:0 0 14px; color:var(--green); font-size:11px; }
     @keyframes shake { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-7px)} 40%,80%{transform:translateX(7px)} }
     .shake { animation:shake .35s ease; }
-    @media (max-width:760px) { body { padding:16px; align-items:start; } .shell { display:block; max-width:440px; margin:4vh auto 0; } .intro { text-align:center; } .orb-wrap { width:190px; margin:0 auto 4px; } .kicker { justify-content:center; } h1 { font-size:38px; } .intro-copy { font-size:12px; } .feature-row { justify-content:center; margin-bottom:20px; } .card { padding:22px; } }
+    @media (max-width:760px) { body { padding:calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom)); align-items:start; } .shell { display:block; max-width:440px; margin:2vh auto 0; } .intro { text-align:center; } .orb-wrap { width:min(190px,52vw); margin:0 auto 4px; } .kicker { justify-content:center; } h1 { font-size:clamp(34px,10vw,42px); } .intro-copy { font-size:12px; } .feature-row { justify-content:center; margin-bottom:20px; } .card { padding:22px; } }
+    @media (max-width:420px) { .shell { margin-top:0; } .orb-wrap { width:145px; } .card-head { margin-bottom:19px; } .brand { font-size:14px; } .key-input { font-size:22px; letter-spacing:.22em; } .security { font-size:9px; } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms!important; transition-duration:.01ms!important; } }
   </style>
 </head>
@@ -53,7 +54,7 @@
       <div class="orb-wrap"><img class="orb" src="/static/jarvis-orb.png" alt=""></div>
       <div class="kicker"><span class="dot"></span> Secure remote pairing</div>
       <h1>Bring the <span>command deck</span> with you.</h1>
-      <p class="intro-copy">Pair this browser with the JARVIS desktop core. Your existing Live API session, skills, files and voice relay remain connected — this is the sharper control surface on top.</p>
+      <p class="intro-copy">Pair this browser with the JARVIS desktop core. Your Live session, skills, files, microphone relay and optional browser speaker stay connected in one responsive command surface.</p>
       <div class="feature-row"><span class="feature">AES transport</span><span class="feature">Voice relay</span><span class="feature">File handoff</span><span class="feature">Local-first</span></div>
     </section>
 
@@ -64,7 +65,7 @@
       <input class="key-input" id="key" type="text" maxlength="6" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="· · · · · ·" aria-label="Session key">
       <div class="err" id="err" role="alert"></div>
       <button class="btn" type="button" onclick="doLogin()">CONNECT TO JARVIS</button>
-      <div class="security"><strong>✓</strong><span>The key expires after ten minutes and is single-use. A paired browser can reconnect automatically until you revoke it from the desktop.</span></div>
+      <div class="security"><strong>✓</strong><span>The key expires after ten minutes and is single-use. The secure dashboard supports microphone input and optional browser audio output after pairing.</span></div>
     </main>
   </div>
   <script>

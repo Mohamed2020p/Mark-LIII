@@ -33,10 +33,11 @@
       --shadow: 0 22px 70px rgba(0,0,0,.36);
       --radius: 22px;
     }
-    html, body { min-height: 100%; margin: 0; }
+    html, body { min-height: 100%; margin: 0; -webkit-text-size-adjust: 100%; }
     body {
-      min-height: 100vh;
+      min-height: 100dvh;
       color: var(--text);
+      overscroll-behavior: none;
       background:
         radial-gradient(circle at 72% -10%, rgba(104, 109, 255, .18), transparent 34rem),
         radial-gradient(circle at -12% 86%, rgba(32, 208, 255, .10), transparent 28rem),
@@ -57,10 +58,11 @@
     button:focus-visible, input:focus-visible, textarea:focus-visible {
       outline: 2px solid var(--cyan); outline-offset: 3px;
     }
-    .app-shell { min-height: 100vh; position: relative; z-index: 1; display: flex; flex-direction: column; }
+    .app-shell { min-height: 100dvh; position: relative; z-index: 1; display: flex; flex-direction: column; }
 
     /* ── top bar ─────────────────────────────────────────────────────────── */
     .topbar {
+      position: sticky; top: 0; z-index: 10;
       height: 78px; flex-shrink: 0; display: flex; align-items: center; gap: 18px;
       padding: 0 28px; border-bottom: 1px solid var(--line);
       background: rgba(6, 9, 22, .78); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
@@ -93,9 +95,15 @@
     .top-action { cursor: pointer; transition: .2s ease; }
     .top-action:hover { color: var(--text); border-color: var(--line-strong); background: rgba(105,231,255,.08); transform: translateY(-1px); }
     .url-chip { max-width: 190px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-2); font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .audio-control { display:flex; align-items:center; gap:7px; padding:4px 6px 4px 4px; border:1px solid var(--line); border-radius:12px; background:var(--surface-soft); }
+    .speaker-btn { width:31px; height:31px; display:grid; place-items:center; border:1px solid var(--line); border-radius:9px; color:var(--muted); background:rgba(255,255,255,.045); cursor:pointer; font-size:15px; transition:.2s ease; }
+    .speaker-btn:hover, .speaker-btn.on { color:var(--green); border-color:rgba(101,242,188,.35); background:rgba(101,242,188,.08); }
+    .volume-control { display:flex; align-items:center; gap:5px; color:var(--muted-2); font-size:8px; font-weight:850; letter-spacing:.10em; }
+    .volume-control input { width:66px; height:4px; accent-color:var(--green); cursor:pointer; }
+    .mobile-nav { display:none; }
 
     /* ── three-column workspace ──────────────────────────────────────────── */
-    .workspace { width: 100%; max-width: 1600px; margin: 0 auto; padding: 22px 24px 18px; display: grid; grid-template-columns: 208px minmax(0, 1fr) 274px; gap: 18px; flex: 1; }
+    .workspace { width: 100%; max-width: 1600px; min-height: 0; margin: 0 auto; padding: 22px 24px 18px; display: grid; grid-template-columns: 208px minmax(0, 1fr) 274px; gap: 18px; flex: 1; }
     .rail, .inspector { min-width: 0; }
     .rail { display: flex; flex-direction: column; gap: 14px; }
     .eyebrow { color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .20em; text-transform: uppercase; }
@@ -121,7 +129,7 @@
     .rail-meter span { display:block; width: 82%; height:100%; border-radius:inherit; background: linear-gradient(90deg,var(--cyan),var(--violet)); box-shadow: 0 0 12px rgba(105,231,255,.6); }
 
     /* ── main command surface ────────────────────────────────────────────── */
-    .main-column { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+    .main-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 18px; }
     .hero-card { min-height: 225px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px; padding: 20px; overflow: hidden; border-radius: var(--radius); position: relative; }
     .hero-card::before { content:""; position:absolute; inset:0; background: radial-gradient(circle at 22% 50%, rgba(105,231,255,.10), transparent 38%), linear-gradient(120deg, rgba(255,255,255,.02), transparent 42%); pointer-events:none; }
     .hero-copy { position: relative; z-index: 1; display:flex; flex-direction:column; justify-content:center; padding: 2px 5px; }
@@ -207,7 +215,7 @@
     .skill b { display:block; margin-bottom:3px; color:var(--text); font-size:10px; }
 
     /* ── composer ────────────────────────────────────────────────────────── */
-    .composer-wrap { flex-shrink:0; width:100%; max-width:1600px; margin:0 auto; padding:0 24px 22px; }
+    .composer-wrap { position:sticky; bottom:0; z-index:8; flex-shrink:0; width:100%; max-width:1600px; margin:0 auto; padding:0 24px calc(22px + env(safe-area-inset-bottom)); }
     .composer { display:flex; align-items:flex-end; gap:9px; padding:10px; border:1px solid var(--line-strong); border-radius:19px; background:rgba(12,19,42,.88); box-shadow:0 16px 46px rgba(0,0,0,.35), 0 0 35px rgba(105,231,255,.06); backdrop-filter:blur(20px); }
     .composer:focus-within { border-color:rgba(105,231,255,.62); box-shadow:0 16px 46px rgba(0,0,0,.35), 0 0 36px rgba(105,231,255,.12); }
     .attach-btn, .mic-btn, .wake-btn, .send-btn { flex-shrink:0; border-radius:12px; cursor:pointer; transition:.2s ease; }
@@ -221,7 +229,8 @@
     .prompt::placeholder { color:var(--muted-2); }
     .send-btn { height:40px; padding:0 17px; border:0; color:#071020; background:linear-gradient(120deg,var(--cyan),#9aa0ff); font-size:10px; font-weight:900; letter-spacing:.15em; }
     .send-btn:hover { filter:brightness(1.08); transform:translateY(-1px); }
-    .composer-note { margin:7px 5px 0; color:var(--muted-2); font-size:9px; text-align:right; }
+    .composer-note { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:7px 5px 0; color:var(--muted-2); font-size:9px; }
+    .voice-status { overflow:hidden; color:var(--muted); text-overflow:ellipsis; white-space:nowrap; }
 
     /* ── toast / modal ───────────────────────────────────────────────────── */
     #toast { position:fixed; z-index:20; top:92px; left:50%; max-width:calc(100% - 30px); padding:10px 15px; border:1px solid rgba(101,242,188,.35); border-radius:99px; color:var(--green); background:rgba(14,37,43,.92); box-shadow:var(--shadow); font-size:11px; font-weight:800; letter-spacing:.06em; opacity:0; pointer-events:none; transform:translate(-50%,-8px); transition:.24s ease; }
@@ -280,9 +289,18 @@
       .connection { min-width:0; padding:8px 9px; font-size:8px; letter-spacing:.10em; }
       .top-chip, .top-action { padding:8px; font-size:0; }
       .top-chip::before { content:"◉"; font-size:12px; }
+      .audio-control { padding:3px; }
+      .volume-control { display:none; }
+      .speaker-btn { width:32px; height:32px; }
       .top-action::before { content:"⚙"; font-size:15px; }
-      .workspace { display:block; padding:13px 12px 10px; }
+      .mobile-nav { display:flex; gap:7px; overflow-x:auto; padding:10px 12px 0; scrollbar-width:none; }
+      .mobile-nav::-webkit-scrollbar { display:none; }
+      .mobile-nav .nav-btn { width:auto; flex:0 0 auto; padding:9px 11px; white-space:nowrap; font-size:9px; }
+      .mobile-nav .nav-icon { width:auto; font-size:13px; }
+      .workspace { display:block; padding:10px 12px 10px; }
       .rail { display:none; }
+      .inspector { display:flex; flex-direction:column; gap:12px; margin-top:12px; }
+      .inspector-card { padding:14px; }
       .main-column { gap:12px; }
       .hero-card { min-height:350px; grid-template-columns:1fr; padding:18px; }
       .hero-copy { justify-content:flex-start; }
@@ -293,7 +311,7 @@
       .hero-actions { max-width:240px; }
       .feed-card { min-height:420px; }
       .message, .file-card { max-width:92%; }
-      .composer-wrap { padding:0 10px 13px; }
+      .composer-wrap { padding:0 10px calc(13px + env(safe-area-inset-bottom)); }
       .composer-note { display:none; }
       .attach-btn, .mic-btn { width:36px; height:38px; }
       .send-btn { padding:0 12px; }
@@ -309,6 +327,7 @@
       .send-btn::after { content:"↗"; font-size:16px; }
       .prompt { font-size:12px; padding-left:2px; padding-right:2px; }
       .hero-card { min-height:365px; }
+      .audio-control { margin-left:auto; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
@@ -327,8 +346,20 @@
       <div class="top-spacer"></div>
       <div class="top-chip secure" id="enc">AES-256</div>
       <div class="top-chip url-chip" id="url">__IP__:__PORT__</div>
+      <div class="audio-control" aria-label="Browser audio output">
+        <button class="speaker-btn" id="speaker-btn" type="button" onclick="toggleSpeaker()" aria-pressed="false" title="Enable browser audio">🔇</button>
+        <label class="volume-control" title="Browser volume"><span>VOL</span><input id="volume" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Browser volume"></label>
+      </div>
       <button class="top-action" type="button" onclick="openSettings()">Settings</button>
     </header>
+
+    <nav class="mobile-nav" aria-label="Mobile JARVIS navigation">
+      <button class="nav-btn active" type="button" onclick="selectView(this, 'command')"><span class="nav-icon">⌁</span> Command</button>
+      <button class="nav-btn" type="button" onclick="selectView(this, 'activity')"><span class="nav-icon">◌</span> Activity</button>
+      <button class="nav-btn" type="button" onclick="selectView(this, 'media')"><span class="nav-icon">✦</span> Media</button>
+      <button class="nav-btn" type="button" onclick="selectView(this, 'integrations')"><span class="nav-icon">◈</span> Integrations</button>
+      <button class="nav-btn" type="button" onclick="selectView(this, 'files')"><span class="nav-icon">□</span> Files</button>
+    </nav>
 
     <div class="workspace">
       <aside class="rail" aria-label="JARVIS navigation">
@@ -425,12 +456,12 @@
       <div class="composer">
         <label class="attach-btn" for="file-inp" title="Send a file">＋</label>
         <input id="file-inp" type="file" multiple style="display:none" accept="*/*">
-        <button class="mic-btn" id="mic-btn" type="button" onclick="doMic()" title="Voice command">⌁</button>
+        <button class="mic-btn" id="mic-btn" type="button" onclick="doMic()" title="Use microphone" aria-label="Use microphone" aria-pressed="false">⌁</button>
         <button class="wake-btn" id="wake" type="button" onclick="doWake()">WAKE</button>
         <textarea class="prompt" id="inp" rows="1" placeholder="Tell JARVIS what to do…" autocomplete="off"></textarea>
         <button class="send-btn" id="send-btn" type="button" onclick="doSend()">SEND ↗</button>
       </div>
-      <div class="composer-note">Enter to send · Shift + Enter for a new line · Esc stops voice</div>
+      <div class="composer-note"><span class="voice-status" id="voice-status">Mic ready · browser speaker off</span><span>Enter to send · Shift + Enter for a new line · Esc stops voice</span></div>
     </div>
   </div>
 
@@ -491,6 +522,76 @@
     const wake = document.getElementById('wake');
     let _socket = null, _retryTimer = null, _socketAttempt = 0, _manualClose = false;
     const _wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+
+    // Browser speaker relay. The desktop's 24 kHz PCM response is sent as
+    // short authenticated JSON frames; Web Audio schedules them back-to-back.
+    const speakerBtn = document.getElementById('speaker-btn');
+    const volume = document.getElementById('volume');
+    const voiceStatus = document.getElementById('voice-status');
+    let _voiceWs=null, _audioCtx=null, _micStream=null, _audioNode=null, _audioSink=null;
+    let _speakerEnabled = localStorage.getItem('jarvis_speaker') === 'on';
+    let _playCtx = null, _playGain = null, _playAt = 0, _lastAudioSeq = 0;
+    volume.value = localStorage.getItem('jarvis_volume') || '0.8';
+
+    function updateSpeakerUi() {
+      speakerBtn.textContent = _speakerEnabled ? '🔊' : '🔇';
+      speakerBtn.classList.toggle('on', _speakerEnabled);
+      speakerBtn.setAttribute('aria-pressed', String(_speakerEnabled));
+      speakerBtn.title = _speakerEnabled ? 'Disable browser audio' : 'Enable browser audio';
+      voiceStatus.textContent = `${_voiceWs ? 'Mic live' : 'Mic ready'} · browser speaker ${_speakerEnabled ? 'on' : 'off'}`;
+    }
+    function ensurePlaybackContext() {
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) throw new Error('Web Audio is unavailable in this browser.');
+      if (!_playCtx || _playCtx.state === 'closed') {
+        _playCtx = new AudioCtor();
+        _playGain = _playCtx.createGain();
+        _playGain.gain.value = Number(volume.value) || .8;
+        _playGain.connect(_playCtx.destination);
+        _playAt = 0;
+      }
+      return _playCtx;
+    }
+    async function toggleSpeaker() {
+      _speakerEnabled = !_speakerEnabled;
+      localStorage.setItem('jarvis_speaker', _speakerEnabled ? 'on' : 'off');
+      updateSpeakerUi();
+      if (_speakerEnabled) {
+        try { await ensurePlaybackContext().resume(); toast('Browser audio enabled'); }
+        catch (error) { _speakerEnabled = false; localStorage.setItem('jarvis_speaker','off'); updateSpeakerUi(); sys(error.message); }
+      } else {
+        if (_playCtx) { try { await _playCtx.close(); } catch (_) {} }
+        _playCtx = null; _playGain = null; _playAt = 0;
+        toast('Browser audio muted');
+      }
+    }
+    volume.addEventListener('input', () => {
+      localStorage.setItem('jarvis_volume', volume.value);
+      if (_playGain) _playGain.gain.value = Number(volume.value) || 0;
+    });
+    function playRemoteAudio(message) {
+      if (!_speakerEnabled || !message.data || Number(message.seq || 0) <= _lastAudioSeq) return;
+      _lastAudioSeq = Number(message.seq || 0);
+      try {
+        const ctx = ensurePlaybackContext();
+        const raw = atob(message.data);
+        const samples = Math.floor(raw.length / 2);
+        const buffer = ctx.createBuffer(1, samples, Number(message.sample_rate) || 24000);
+        const channel = buffer.getChannelData(0);
+        for (let i = 0; i < samples; i++) {
+          const lo = raw.charCodeAt(i * 2), hi = raw.charCodeAt(i * 2 + 1);
+          let value = (hi << 8) | lo;
+          if (value & 0x8000) value -= 0x10000;
+          channel[i] = value / 32768;
+        }
+        const node = ctx.createBufferSource(); node.buffer = buffer; node.connect(_playGain);
+        _playAt = Math.max(_playAt, ctx.currentTime + .035);
+        node.start(_playAt); _playAt += buffer.duration;
+      } catch (error) {
+        sys(`Browser audio paused: ${error.message}`);
+      }
+    }
+    updateSpeakerUi();
     function connectSocket() {
       if (_manualClose) return;
       try { _socket = new WebSocket(`${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`); }
@@ -501,6 +602,7 @@
       _socket.onmessage = event => {
         let msg; try { msg = JSON.parse(event.data); } catch (_) { return; }
         if (msg.type === 'log') append(msg.speaker, msg.text);
+        if (msg.type === 'audio') playRemoteAudio(msg);
         if (msg.type === 'status') setStatus(msg.state);
         if (msg.type === 'wake') sys('Wake word detected — connecting…');
         if (msg.type === 'sys') sys(msg.text);
@@ -583,11 +685,15 @@
     document.getElementById('file-inp').addEventListener('change', function() { Array.from(this.files).forEach(uploadFile); this.value=''; });
 
     // ── Real-time browser voice — same /ws/phone-audio contract ─────────────
-    const micBtn = document.getElementById('mic-btn'); let _voiceWs=null, _audioCtx=null, _micStream=null, _audioNode=null, _audioSink=null;
-    function micIdle() { micBtn.textContent='⌁'; micBtn.title='Voice command'; micBtn.classList.remove('recording'); }
+    const micBtn = document.getElementById('mic-btn');
+    function micIdle() { micBtn.textContent='⌁'; micBtn.title='Use microphone'; micBtn.setAttribute('aria-pressed','false'); micBtn.classList.remove('recording'); updateSpeakerUi(); }
     function f32ToPcm16(f32, srcRate) { let samples=f32; if(srcRate!==16000){const ratio=srcRate/16000; const len=Math.round(f32.length/ratio); samples=new Float32Array(len); for(let i=0;i<len;i++) samples[i]=f32[Math.min(Math.round(i*ratio),f32.length-1)];} const out=new Int16Array(samples.length); for(let i=0;i<samples.length;i++) out[i]=Math.max(-32768,Math.min(32767,Math.round(samples[i]*32768))); return out.buffer; }
     async function doMic() {
       if (_voiceWs) { stopVoice(); return; }
+      if (!window.isSecureContext && !['localhost','127.0.0.1'].includes(location.hostname)) {
+        sys('Microphone access requires the secure HTTPS dashboard. Reopen the QR link and accept its local certificate.');
+        toast('Open the HTTPS dashboard to use the mic'); return;
+      }
       if (!navigator.mediaDevices?.getUserMedia) { sys('This browser does not expose microphone access.'); return; }
       let stream; try { stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}}); } catch(error) { sys(error.name==='NotAllowedError'?'Microphone permission denied. Allow it in the browser address bar.':`Mic error: ${error.message}`); return; }
       let ctx; try { ctx=new AudioContext({sampleRate:16000}); } catch (_) { ctx=new AudioContext(); } if(ctx.state==='suspended') await ctx.resume();
@@ -605,7 +711,7 @@
           const sink=ctx.createGain(); sink.gain.value=0; node.connect(sink); sink.connect(ctx.destination);
           source.connect(node); _audioSink=sink; _audioNode=node;
         } catch (_) { const node=ctx.createScriptProcessor(4096,1,1); node.onaudioprocess=event=>{if(socket.readyState===1)socket.send(f32ToPcm16(event.inputBuffer.getChannelData(0),rate));}; const sink=ctx.createGain(); sink.gain.value=0; node.connect(sink); sink.connect(ctx.destination); source.connect(node); _audioSink=sink; _audioNode=node; }
-        micBtn.textContent='■'; micBtn.title='Stop voice'; micBtn.classList.add('recording'); sys('Browser voice live — speak now.'); toast('Microphone live');
+        micBtn.textContent='■'; micBtn.title='Stop voice'; micBtn.setAttribute('aria-pressed','true'); micBtn.classList.add('recording'); updateSpeakerUi(); sys('Browser voice live — speak now.'); toast('Microphone live');
       };
       socket.onclose=()=>stopVoice(); socket.onerror=()=>{sys('Voice connection failed.');stopVoice();}; _voiceWs=socket; _audioCtx=ctx; _micStream=stream;
     }
