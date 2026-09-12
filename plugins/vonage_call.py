@@ -78,7 +78,7 @@ PLUGIN_SETTINGS = {
     "fields": [
         {
             "key": "enabled",
-            "label": "Enable outbound calls",
+            "label": "Enable Vonage call bridge (not Plugin Manager)",
             "type": "toggle",
             "default": False,
         },
@@ -320,7 +320,12 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     if cfg is None:
         return f"Vonage is not ready: {error} Configure it in Plugin Settings first."
     if not cfg["enabled"]:
-        return "The Vonage call bridge is disabled. Enable it in Plugin Settings first."
+        return (
+            "The Vonage plugin is loaded, but its call-bridge toggle is OFF. "
+            "Open Settings > Plugin Settings > VONAGE VOICE OWNER CALL, turn "
+            "on 'Enable Vonage call bridge', and press SAVE. This is separate "
+            "from the Plugin Manager ON/OFF toggle."
+        )
 
     requested_message = params.get("message") or cfg["message"] or _DEFAULT_MESSAGE
     try:
