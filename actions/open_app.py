@@ -42,6 +42,8 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
     "hex-rays":           {"Windows": "IDA Pro",                 "Darwin": "ida64",                 "Linux": "ida64"},
     "ida64":              {"Windows": "ida64.exe",               "Darwin": "ida64",                 "Linux": "ida64"},
     "terminal":           {"Windows": "wt",                      "Darwin": "Terminal",             "Linux": "x-terminal-emulator"},
+    "xampp":              {"Windows": "xampp-control.exe",        "Darwin": "XAMPP",                 "Linux": "xampp"},
+    "xampp control panel": {"Windows": "xampp-control.exe",       "Darwin": "XAMPP",                 "Linux": "xampp"},
     "cmd":                {"Windows": "cmd.exe",                 "Darwin": "Terminal",             "Linux": "bash"},
     "powershell":         {"Windows": "powershell.exe",          "Darwin": "Terminal",             "Linux": "bash"},
     "postman":            {"Windows": "Postman",                 "Darwin": "Postman",              "Linux": "postman"},
@@ -85,6 +87,30 @@ def _normalize(raw: str) -> str:
     return raw  
 
 def _launch_windows(app_name: str) -> bool:
+
+    # XAMPP is commonly installed in C:\xampp rather than on PATH. Find its
+    # real control panel before falling back to a Start-menu search.
+    if app_name.casefold() in {"xampp", "xampp-control.exe", "xampp control panel"}:
+        roots = [
+            os.environ.get("XAMPP_HOME", ""),
+            os.environ.get("XAMPP_ROOT", ""),
+            r"C:\xampp",
+            r"D:\xampp",
+            str(Path(os.environ.get("ProgramFiles", "")) / "xampp"),
+            str(Path(os.environ.get("ProgramFiles(x86)", "")) / "xampp"),
+        ]
+        for root in filter(None, roots):
+            root_path = Path(root)
+            candidate = (root_path if root_path.suffix.casefold() == ".exe"
+                         else root_path / "xampp-control.exe")
+            if candidate.exists():
+                try:
+                    subprocess.Popen([str(candidate)], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    time.sleep(1.0)
+                    return True
+                except Exception as e:
+                    print(f"[open_app] XAMPP launch failed: {e}")
 
     # IDA is commonly installed outside PATH. Prefer a direct executable when
     # available, then fall back to the Start Menu search below. This keeps the
@@ -306,7 +332,7 @@ def open_app(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "open_app",
-    "description": "Opens any installed application on the computer, including Telegram, VS Code, IDA Pro, Task Manager, and other desktop apps. Use this whenever the user explicitly asks to open, launch, or start an app or program; always call this tool and report only its confirmed result.",
+    "description": "Opens any installed application on the real Windows desktop or other host OS, including XAMPP Control Panel, Telegram, VS Code, IDA Pro, Task Manager, and other desktop apps. On Windows, XAMPP searches standard C:/xampp and D:/xampp plus Program Files locations before Start-menu fallback. Use this whenever the user explicitly asks to open, launch, or start an app or program; always call this tool and report only its confirmed result.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

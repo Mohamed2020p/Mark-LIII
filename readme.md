@@ -58,7 +58,8 @@ It's not just an assistant — it's an extension of your digital life.
 | 📂 File Processor | Read, summarize, and answer questions about local files |
 | 💻 Code Helper | Single-file generation, editing, explanation, testing, debugging, and VS Code opening |
 | 🧑‍💻 VS Code Workspace | Inspect, search, organize, edit, create folders, inspect errors, and run protected tests/builds in the requested workspace |
-| 🌐 Browser Control | Open URLs, navigate tabs, and interact with the browser by voice |
+| 🌐 Browser Control | Open public or Windows localhost/XAMPP URLs, inspect forms, filter rendered HTML source, and automate browser controls by voice |
+| 🧰 Desktop Command Control | Run an exact user-requested command on the paired host with output and working-directory support; arbitrary commands remain interface-confirmed |
 | 📨 Send Message | Search and compose messages through WhatsApp, Telegram, and more; sending waits for human confirmation |
 | 📱 Telegram Control | Open Telegram Desktop, search chats/contacts, read visible text with optional OCR, and send only after confirmation |
 | 🎬 YouTube Control | Search, play, and control YouTube playback by voice |
@@ -249,9 +250,10 @@ Mark LIII/
 │   ├── system_monitor.py     # CPU / RAM / GPU / temperature telemetry
 │   ├── computer_settings.py  # Volume, brightness, WiFi, power (per-OS)
 │   ├── computer_control.py   # Keyboard shortcuts, mouse, window management
+│   ├── command_control.py    # Explicit host command execution with captured output
 │   ├── process_control.py    # Read-only process inspection and confirmation-protected termination
 │   ├── open_app.py           # Application launcher (per-OS name map)
-│   ├── browser_control.py    # Web browser control
+│   ├── browser_control.py    # Web/localhost browser control, form inspection, and HTML source filtering
 │   ├── file_controller.py    # File system operations
 │   ├── file_processor.py     # Document reading and summarization
 │   ├── send_message.py       # Confirmation-protected messaging integration

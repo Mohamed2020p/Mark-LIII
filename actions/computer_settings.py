@@ -32,6 +32,58 @@ else:
     _WIN_HIDE: dict = {}
 
 
+def _windows_audio_endpoint():
+    """Return the Windows default output endpoint through pycaw."""
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+    devices = AudioUtilities.GetSpeakers()
+    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return cast(interface, POINTER(IAudioEndpointVolume))
+
+
+def _windows_media_nudge(key: str, presses: int = 5) -> None:
+    if not _PYAUTOGUI:
+        raise RuntimeError("PyAutoGUI is required for the Windows volume media key.")
+    pyautogui.press(key, presses=presses, interval=0.01)
+
+
+def _windows_media_set_volume(value: int) -> None:
+    """Fallback for Windows when pycaw cannot reach the audio endpoint.
+
+    The media keys operate on the real Windows master output, unlike browser
+    gain. Sixty DOWN events reliably reaches zero on Windows; for other values
+    we use the readable endpoint level when available and otherwise approximate
+    Windows' two-percent media-key steps.
+    """
+    if not _PYAUTOGUI:
+        raise RuntimeError(
+            "Windows audio access needs pycaw/comtypes or PyAutoGUI. "
+            "Run: pip install pycaw comtypes pyautogui"
+        )
+
+    value = max(0, min(100, int(value)))
+    if value == 0:
+        pyautogui.press("volumedown", presses=60, interval=0.01)
+        return
+    if value == 100:
+        pyautogui.press("volumeup", presses=60, interval=0.01)
+        return
+
+    current = volume_get()
+    if current is None:
+        # Reset first, then climb using the standard Windows media-key step.
+        pyautogui.press("volumedown", presses=60, interval=0.01)
+        pyautogui.press("volumeup", presses=max(1, round(value / 2)), interval=0.01)
+        return
+
+    delta = value - current
+    if delta:
+        key = "volumeup" if delta > 0 else "volumedown"
+        pyautogui.press(key, presses=max(1, round(abs(delta) / 2)), interval=0.01)
+
+
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -60,7 +112,7 @@ def _get_macos_wifi_interface() -> str:
 
 def volume_up():
     if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumeup")
+        _windows_media_nudge("volumeup")
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) + 10)"],
@@ -71,7 +123,7 @@ def volume_up():
 
 def volume_down():
     if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumedown")
+        _windows_media_nudge("volumedown")
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) - 10)"],
@@ -82,6 +134,8 @@ def volume_down():
 
 def volume_mute():
     if _OS == "Windows":
+        if not _PYAUTOGUI:
+            raise RuntimeError("PyAutoGUI is required for the Windows mute media key.")
         pyautogui.press("volumemute")
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", "set volume with output muted"],
@@ -99,12 +153,7 @@ def volume_get() -> int | None:
     try:
         if _OS == "Windows":
             import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
+            vol       = _windows_audio_endpoint()
             db        = vol.GetMasterVolumeLevel()
             if db <= -65.0:
                 return 0
@@ -164,19 +213,17 @@ def volume_set(value: int):
     if _OS == "Windows":
         try:
             import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
+            vol    = _windows_audio_endpoint()
+            vol_db = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
             vol.SetMasterVolumeLevel(vol_db, None)
             return
         except Exception as e:
-            print(f"[Settings] pycaw failed, using keypress fallback: {e}")
-            pyautogui.press("volumemute")
-            pyautogui.press("volumemute")
+            # Never use mute/unmute as a substitute for setting level 0: that
+            # leaves the actual volume unchanged and was why "set volume 0"
+            # appeared to do nothing on some Windows installations.
+            print(f"[Settings] pycaw failed, using Windows media-key fallback: {e}")
+            _windows_media_set_volume(value)
+            return
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
             capture_output=True)
@@ -702,6 +749,7 @@ _DANGEROUS_ACTIONS = set(_IRREVERSIBLE)
 _ALIASES = {
     "volume_up":       ("louder", "raise volume", "turn it up", "increase volume"),
     "volume_down":     ("quieter", "lower volume", "turn it down", "decrease volume"),
+    "volume_set":      ("set volume", "set sound", "volume to", "sound to", "make volume"),
     "mute":            ("silence", "sound off", "no sound"),
     "brightness_up":   ("brighter", "raise brightness", "increase brightness"),
     "brightness_down": ("dimmer", "dim", "lower brightness", "decrease brightness"),
@@ -748,9 +796,20 @@ def _detect_action(description: str) -> dict:
     low = raw.lower()
 
     # 2. "set volume to 30", "sesi 30 yap" — a number next to a volume word.
-    num = re.search(r"(\d{1,3})\s*%?", low)
-    if num and any(w in low for w in ("volume", "ses", "sound", "lautstark", "громкость")):
-        return {"action": "volume_set", "value": max(0, min(100, int(num.group(1))))}
+    volume_words = ("volume", "ses", "sound", "lautstark", "громкость")
+    if any(w in low for w in volume_words):
+        num = re.search(r"(\d{1,3})\s*%?", low)
+        if num:
+            return {"action": "volume_set", "value": max(0, min(100, int(num.group(1))))}
+        # Speech recognition often returns “zero” instead of the digit 0.
+        word_levels = {
+            "zero": 0, "one": 1, "ten": 10, "twenty": 20,
+            "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+            "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100,
+        }
+        for word, level in word_levels.items():
+            if re.search(rf"\b{word}\b", low):
+                return {"action": "volume_set", "value": level}
 
     # 3. Alias phrases.
     for action, phrases in _ALIASES.items():
@@ -937,7 +996,7 @@ TOOL = {
                 "type": "STRING",
                 "description": (
                     "The exact action. Prefer this over `description` — pick one of: "
-                    "volume_up | volume_down | volume_set | mute | "
+                    "volume_up | volume_down | volume_set (value 0-100) | mute | "
                     "brightness_up | brightness_down | sleep_display | "
                     "pause_video | close_app | close_window | full_screen | "
                     "minimize | maximize | snap_left | snap_right | "
@@ -956,7 +1015,8 @@ TOOL = {
                 "type": "STRING",
                 "description": (
                     "Fallback only, when no action name above fits. "
-                    "Resolved locally — no extra model call."
+                    "Resolved locally — no extra model call. For an exact PC volume, "
+                    "use action=volume_set and value=0..100 (including 0)."
                 )
             },
             "value": {

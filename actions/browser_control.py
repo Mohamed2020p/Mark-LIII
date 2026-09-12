@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import platform
 import shutil
@@ -32,6 +33,19 @@ def _normalize_url(url: str) -> str:
         return "about:blank"
     if "://" in url:
         return url
+
+    # Local development hosts are not public .com domains. This explicit
+    # branch keeps "localhost", "localhost:8080", and 127.0.0.1 on HTTP so
+    # XAMPP/Apache, Vite, PHP, and other Windows dev servers open correctly.
+    lower = url.lower()
+    local_hosts = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+    local = any(
+        lower == host or lower.startswith(host + ":") or lower.startswith(host + "/")
+        for host in local_hosts
+    )
+    if local:
+        return "http://" + url
+
     # No dot at all → assume .com  (e.g. "instagram" → "instagram.com")
     if "." not in url:
         url = url + ".com"
@@ -724,6 +738,94 @@ class _BrowserSession:
         page = await self._get_page()
         return page.url
 
+    async def get_source(self, query: str = "", selector: str = "",
+                         max_chars: int = 24_000) -> str:
+        """Return page HTML, or focused source snippets for a local filter."""
+        page = await self._get_page()
+        try:
+            if selector:
+                html = await page.locator(selector).first.evaluate(
+                    "(element) => element.outerHTML"
+                )
+            else:
+                html = await page.content()
+
+            limit = max(1_000, min(int(max_chars or 24_000), 60_000))
+            needle = (query or "").strip().casefold()
+            if needle:
+                source_lower = html.casefold()
+                terms = [needle] if " " not in needle else [needle, *needle.split()]
+                snippets: list[str] = []
+                seen: set[tuple[int, int]] = set()
+                for term in terms:
+                    if not term:
+                        continue
+                    start = 0
+                    while len(snippets) < 80:
+                        pos = source_lower.find(term, start)
+                        if pos < 0:
+                            break
+                        left, right = max(0, pos - 260), min(len(html), pos + len(term) + 420)
+                        marker = (left, right)
+                        if marker not in seen:
+                            snippets.append(html[left:right])
+                            seen.add(marker)
+                        start = pos + max(1, len(term))
+                if snippets:
+                    html = (
+                        f"<!-- source matches for: {query} -->\n\n"
+                        + "\n\n<!-- source match -->\n\n".join(snippets)
+                    )
+                else:
+                    html = f"No source match for: {query}"
+
+            clipped = html[:limit]
+            suffix = "\n... [source clipped; narrow query or raise max_chars]" if len(html) > limit else ""
+            return f"HTML source for {page.url}:\n{clipped}{suffix}"
+        except Exception as e:
+            return f"Could not read page source: {e}"
+
+    async def inspect(self, query: str = "", max_chars: int = 12_000) -> str:
+        """Describe controls and links so a task can target the right field."""
+        page = await self._get_page()
+        try:
+            controls = await page.evaluate("""
+                () => Array.from(document.querySelectorAll(
+                    'input, textarea, select, button, a, [role="button"], [role="textbox"]'
+                )).slice(0, 250).map((el, index) => ({
+                    index,
+                    tag: el.tagName.toLowerCase(),
+                    type: el.getAttribute('type') || '',
+                    id: el.id || '',
+                    name: el.getAttribute('name') || '',
+                    placeholder: el.getAttribute('placeholder') || '',
+                    aria_label: el.getAttribute('aria-label') || '',
+                    label: el.labels ? Array.from(el.labels).map(label => label.innerText.trim()).join(' ') : '',
+                    text: (el.innerText || el.value || '').trim().slice(0, 160),
+                    href: el.getAttribute('href') || ''
+                }))
+            """)
+            needle = (query or "").strip().casefold()
+            if needle:
+                controls = [
+                    item for item in controls
+                    if needle in json.dumps(item, ensure_ascii=False).casefold()
+                ]
+            payload = {
+                "url": page.url,
+                "title": await page.title(),
+                "query": query or "",
+                "controls": controls,
+                "next": "Use smart_type with a placeholder/label/name description, or fill_form with a CSS selector.",
+            }
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            limit = max(1_000, min(int(max_chars or 12_000), 30_000))
+            if len(text) > limit:
+                text = text[:limit] + "\n... [inspection clipped; filter with query]"
+            return text
+        except Exception as e:
+            return f"Could not inspect page controls: {e}"
+
     async def fill_form(self, fields: dict) -> str:
         page    = await self._get_page()
         results = []
@@ -1027,6 +1129,15 @@ def browser_control(
             result = sess.run(sess.smart_type(params.get("description", ""), params.get("text", "")))
         elif action == "get_text":
             result = sess.run(sess.get_text())
+        elif action == "get_source" or action in ("source", "view_source", "get_html"):
+            result = sess.run(sess.get_source(
+                params.get("query", ""), params.get("selector", ""),
+                int(params.get("max_chars", 24_000)),
+            ))
+        elif action in ("inspect", "inspect_page", "find_controls"):
+            result = sess.run(sess.inspect(
+                params.get("query", ""), int(params.get("max_chars", 12_000))
+            ))
         elif action == "get_url":
             result = sess.run(sess.get_url())
         elif action == "press":
@@ -1063,13 +1174,13 @@ def _log(player, text: str):
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "browser_control",
-    "description": "Controls any web browser. Use for: opening websites, searching the web, clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions (click, type, fill_form...) attach an automation browser. Always pass the 'browser' parameter when the user specifies a browser (e.g. 'open in Edge', 'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously.",
+    "description": "Controls any web browser, including Windows localhost/XAMPP pages. Use for opening URLs, searching, clicking, filling forms, inspecting controls, reading rendered text, reading/filtering HTML source, scrolling, screenshots, and navigation. Simple open/search requests launch the user's own browser normally (their real profile and logged-in accounts); interactive actions attach an automation browser and can inspect the current page before typing. Always pass the 'browser' parameter when the user specifies one. For localhost, preserve the exact host and port (for example http://localhost:8080), never turn it into a public .com domain.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | inspect | get_text | get_source | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
             },
             "browser": {
                 "type": "STRING",
@@ -1081,7 +1192,7 @@ TOOL = {
             },
             "query": {
                 "type": "STRING",
-                "description": "Search query for search action"
+                "description": "Search query, or case-insensitive source/control filter for get_source/inspect"
             },
             "engine": {
                 "type": "STRING",
@@ -1089,11 +1200,15 @@ TOOL = {
             },
             "selector": {
                 "type": "STRING",
-                "description": "CSS selector for click/type"
+                "description": "CSS selector for click/type, or an element whose outerHTML should be returned by get_source"
             },
             "text": {
                 "type": "STRING",
                 "description": "Text to click or type"
+            },
+            "fields": {
+                "type": "OBJECT",
+                "description": "CSS selector to value map for fill_form"
             },
             "description": {
                 "type": "STRING",
@@ -1114,6 +1229,10 @@ TOOL = {
             "path": {
                 "type": "STRING",
                 "description": "Save path for screenshot"
+            },
+            "max_chars": {
+                "type": "INTEGER",
+                "description": "Maximum source/inspection characters returned (default 24000)"
             },
             "incognito": {
                 "type": "BOOLEAN",
