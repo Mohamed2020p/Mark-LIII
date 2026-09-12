@@ -2,8 +2,11 @@ import subprocess
 import sys
 import json
 import re
+import shlex
 import time
 from pathlib import Path
+
+from core import confirm as confirm_gate
 
 
 def get_base_dir():
@@ -222,7 +225,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = _safe_project_path(project_dir, file_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -293,8 +296,10 @@ def _open_vscode(project_dir: Path) -> bool:
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
-        parts = run_command.split()
-        if parts[0].lower() == "python":
+        parts = shlex.split(str(run_command), posix=True)
+        if not parts:
+            return "No run command was provided."
+        if parts[0].lower() in {"python", "python3"}:
             parts[0] = sys.executable
 
         result = subprocess.run(
@@ -420,7 +425,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = _safe_project_path(project_dir, fix_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -434,11 +439,34 @@ Fixed code for {fix_path}:"""
 
     return updated_codes
 
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_project_path(project_dir: Path, relative_path: str) -> Path:
+    """Resolve a model-produced project path without allowing traversal."""
+    candidate = (project_dir / str(relative_path).replace("\\", "/")).resolve()
+    try:
+        candidate.relative_to(project_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(f"Project path escapes the workspace: {relative_path}") from exc
+    return candidate
+
+
 def _build_project(
     description: str,
     language: str,
     project_name: str,
     timeout: int,
+    workspace_path: str = "",
+    open_vscode: bool = True,
+    install_dependencies: bool = False,
+    run_after_write: bool = False,
+    run_command: str = "",
     speak=None,
     player=None,
 ) -> str:
@@ -460,14 +488,21 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    proj_name    = project_name or plan.get("project_name", "jarvis_project")
-    proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
+    if workspace_path:
+        project_dir = Path(workspace_path).expanduser()
+        if not project_dir.is_absolute():
+            project_dir = Path.cwd() / project_dir
+        project_dir = project_dir.resolve()
+        proj_name = project_dir.name or (project_name or "jarvis_workspace")
+    else:
+        proj_name = project_name or plan.get("project_name", "jarvis_project")
+        proj_name = re.sub(r"[^\w\-]", "_", proj_name)
+        project_dir = (PROJECTS_DIR / proj_name).resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
     entry_point  = plan.get("entry_point", "main.py")
-    run_command  = plan.get("run_command", f"python {entry_point}")
+    planned_command = run_command or plan.get("run_command", f"python {entry_point}")
     dependencies = plan.get("dependencies", [])
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
@@ -514,20 +549,41 @@ def _build_project(
         return msg
 
     if dependencies:
-        install_result = _install_dependencies(dependencies, project_dir)
-        log(install_result)
+        if install_dependencies:
+            install_result = _install_dependencies(dependencies, project_dir)
+            log(install_result)
+        else:
+            log("Dependencies were identified but not installed; installation was not requested.")
 
-    _open_vscode(project_dir)
+    vscode_opened = False
+    if open_vscode:
+        vscode_opened = _open_vscode(project_dir)
+        if not vscode_opened:
+            log("VS Code could not be opened automatically; the workspace is saved.")
+
+    if not run_after_write:
+        opened = " and opened in VS Code" if vscode_opened else ""
+        dependency_note = (
+            " Dependencies were not installed because installation was not requested."
+            if dependencies and not install_dependencies else ""
+        )
+        msg = (
+            f"Project '{proj_name}' was written to {project_dir}{opened}."
+            f"{dependency_note} I did not execute commands because that was not requested."
+        )
+        if speak:
+            speak(msg)
+        return msg
 
     last_output   = ""
-    auto_installs = 0  
+    auto_installs = 0
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
-        last_output = _run_project(run_command, project_dir, timeout)
+        last_output = _run_project(planned_command, project_dir, timeout)
         log(f"Output preview: {last_output[:150]}")
 
-        if not _has_error(last_output, run_command):
+        if not _has_error(last_output, planned_command):
             msg = (
                 f"Project '{proj_name}' is working, sir. "
                 f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
@@ -540,7 +596,7 @@ def _build_project(
             break
 
         error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
+        if install_dependencies and error_type == "dependency_error" and auto_installs < 3:
             installed = _try_auto_install(last_output, project_dir)
             if installed:
                 auto_installs += 1
@@ -583,52 +639,103 @@ def dev_agent(
     session_memory=None,
     speak=None,
 ) -> str:
-    p            = parameters or {}
-    description  = p.get("description", "").strip()
-    language     = p.get("language", "python").strip()
-    project_name = p.get("project_name", "").strip()
-    timeout      = int(p.get("timeout", 30))
+    p = parameters or {}
+    description = str(p.get("description", "")).strip()
+    language = str(p.get("language", "python")).strip() or "python"
+    project_name = str(p.get("project_name", "")).strip()
+    workspace_path = str(p.get("workspace_path", "")).strip()
+    timeout = max(1, min(int(p.get("timeout", 30)), 300))
+    open_vscode = _as_bool(p.get("open_vscode"), True)
+    install_dependencies = _as_bool(p.get("install_dependencies"), False)
+    run_after_write = _as_bool(p.get("run_after_write"), False)
+    run_command = str(p.get("run_command", "")).strip()
 
     if not description:
-        return "Please describe the project you want me to build, sir."
+        return "Please describe the project or coding task you want me to handle, sir."
 
-    return _build_project(
-        description  = description,
-        language     = language,
-        project_name = project_name,
-        timeout      = timeout,
-        speak        = speak,
-        player       = player,
-    )
+    def run_task() -> str:
+        return _build_project(
+            description=description,
+            language=language,
+            project_name=project_name,
+            timeout=timeout,
+            workspace_path=workspace_path,
+            open_vscode=open_vscode,
+            install_dependencies=install_dependencies,
+            run_after_write=run_after_write,
+            run_command=run_command,
+            speak=speak,
+            player=player,
+        )
+
+    # Writing requested code is reversible and can proceed in the current user
+    # turn. Package installation and arbitrary execution are a separate human
+    # confirmation boundary; the model cannot authorize them with a parameter.
+    if install_dependencies or run_after_write:
+        if confirm_gate.pending_title():
+            return "There is already a confirmation waiting on screen. Ask the user to answer it first."
+        phase = "install dependencies and run/fix the project" if install_dependencies else "run and possibly modify the project while fixing errors"
+        location = workspace_path or (project_name or "a new Jarvis project")
+        return confirm_gate.request(
+            key="dev-agent-execution",
+            title="VS Code project execution",
+            detail=f"Workspace: {location}\nTask: {description}\n\nThis will {phase}.",
+            run=run_task,
+        )
+
+    return run_task()
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "dev_agent",
-    "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
+    "description": (
+        "Builds a new multi-file project in the requested workspace and opens it in VS Code. "
+        "It plans, writes, and can inspect/fix errors. Dependency installation and execution "
+        "are opt-in parameters and always use the human confirmation gate; it never silently "
+        "runs commands or installs packages."
+    ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "description": {
                 "type": "STRING",
-                "description": "What the project should do"
+                "description": "What project or multi-file coding task the user explicitly requested",
             },
             "language": {
                 "type": "STRING",
-                "description": "Programming language (default: python)"
+                "description": "Programming language (default: python)",
+            },
+            "workspace_path": {
+                "type": "STRING",
+                "description": "Existing or new VS Code workspace folder; use the exact path requested by the user",
             },
             "project_name": {
                 "type": "STRING",
-                "description": "Optional project folder name"
+                "description": "Optional folder name when no workspace_path is provided",
+            },
+            "open_vscode": {
+                "type": "BOOLEAN",
+                "description": "Open the resulting workspace in VS Code (default true)",
+            },
+            "install_dependencies": {
+                "type": "BOOLEAN",
+                "description": "Only true when the user explicitly requested dependency installation",
+            },
+            "run_after_write": {
+                "type": "BOOLEAN",
+                "description": "Only true when the user explicitly requested a run/test/build/debug phase",
+            },
+            "run_command": {
+                "type": "STRING",
+                "description": "Explicit project command to run when run_after_write is true",
             },
             "timeout": {
                 "type": "INTEGER",
-                "description": "Run timeout in seconds (default: 30)"
-            }
+                "description": "Run timeout in seconds (default: 30)",
+            },
         },
-        "required": [
-            "description"
-        ]
+        "required": ["description"],
     },
     "handler": dev_agent,
 }

@@ -29,7 +29,7 @@ It's not just an assistant — it's an extension of your digital life.
 | 🧠 Recallable Memory | No size limit and nothing silently forgotten — the prompt carries what fits, the rest is looked up on demand from a local search |
 | 👁️ Memory Panel | See every fact JARVIS has stored about you, when it learned it, and delete any of it in one click |
 | ↩️ Undo | Take back what the assistant did — files it moved, renamed, created or wrote, and settings it changed |
-| ⚠️ Real Confirmation | Shutdown, restart and WiFi wait for a button **you** press — the model cannot confirm its own irreversible actions |
+| ⚠️ Real Confirmation | Shutdown, restart, WiFi, outbound messages, code execution, dependency installs, and deletion wait for a button **you** press — the model cannot confirm its own protected actions |
 | 🎧 Audio Device Picker | Choose the microphone and speakers by name, filtered to the short list your OS shows — and measured, so every entry actually works |
 | 🔗 Session Continuity | A dropped connection, a voice change or a device change no longer wipes the conversation |
 | 🧩 Plugin System | Drop a single `.py` file into `plugins/` — JARVIS learns a new skill on next launch |
@@ -39,15 +39,15 @@ It's not just an assistant — it's an extension of your digital life.
 | 🎙️ Voice Picker | Choose from 5 native Gemini voices and switch live from the UI — no restart |
 | ♾️ Unlimited Sessions | Sliding-window context compression — one conversation can last for hours |
 | 🖥️ System Control | Launch apps, adjust volume/brightness, WiFi, shortcuts, power — all by voice |
-| 🧩 Autonomous Tasks | High-level planning for complex multi-step goals via agent mode |
+| 🧩 Explicit Coding Tasks | High-level planning for explicitly requested multi-file projects via agent mode |
 | 👁️ Visual Awareness | Real-time screen capture and webcam vision piped into your main Gemini session |
 | 🧠 Persistent Memory | Deeply remembers projects, preferences, and personal context across sessions |
 | ⌨️ Hybrid Input | Seamlessly switch between keyboard typing and voice commands |
-| 🌅 Morning Briefing | On first boot: greets you, reads the time, recaps yesterday, and fetches live news |
-| 🔔 Proactive 2.0 | Time-aware, context-aware check-ins — knows the time of day, your projects, and what you've been discussing |
+| 🌅 Morning Briefing | Available only after the user explicitly opts into autonomous behavior; never starts work or calls tools by itself |
+| 🔔 Proactive 2.0 | Explicit opt-in only; the default mode stays silent until the user issues a command |
 | 🗓️ Session Memory | Summarises each conversation and mentions it naturally next morning — consumed after use, never repeats |
-| 👁️‍🗨️ Background Monitoring | User-configured topic watching — checks for new headlines once a day and alerts naturally |
-| 📊 Hardware Monitoring | Continuous CPU, RAM, GPU and temperature telemetry with localized voice alerts |
+| 👁️‍🗨️ Background Monitoring | User-configured topic watching — explicit opt-in only; the default performs no background checks or alerts |
+| 📊 Hardware Monitoring | Optional CPU, RAM, GPU and temperature telemetry; disabled by default in explicit-command mode |
 | 🌤️ Weather Report | Live weather data for your city, personalized from memory |
 | 🗺️ Dynamic Content Panel | Scrollable display layer beneath the HUD that renders web results, news, and search data |
 | 🔍 Multi-Mode Web Search | `news` / `research` / `price` / `compare` / `search` — Gemini Grounded first, DDG fallback |
@@ -55,12 +55,14 @@ It's not just an assistant — it's an extension of your digital life.
 | ✈️ Flight Finder | Live flight price and availability lookup |
 | 🎮 Game Updater | Checks and triggers game updates on Steam and Epic Games on demand |
 | 📂 File Processor | Read, summarize, and answer questions about local files |
-| 💻 Code Helper | Inline code review, debugging, and generation |
+| 💻 Code Helper | Single-file generation, editing, explanation, testing, debugging, and VS Code opening |
+| 🧑‍💻 VS Code Workspace | Inspect, search, organize, edit, create folders, inspect errors, and run protected tests/builds in the requested workspace |
 | 🌐 Browser Control | Open URLs, navigate tabs, and interact with the browser by voice |
-| 📨 Send Message | Compose and send messages through WhatsApp, Telegram, and more |
+| 📨 Send Message | Search and compose messages through WhatsApp, Telegram, and more; sending waits for human confirmation |
+| 📱 Telegram Control | Open Telegram Desktop, search chats/contacts, read visible text with optional OCR, and send only after confirmation |
 | 🎬 YouTube Control | Search, play, and control YouTube playback by voice |
 | 🖱️ Desktop Control | Taskbar, window management, and desktop-level operations |
-| 🧑‍💻 Silent Language Memory | Detects spoken language on first use — all future sessions adapt automatically |
+| 🧑‍💻 Language Handling | Replies in the current user language; it does not save a language preference unless asked |
 | 📱 Remote Dashboard | Control the assistant from your phone via QR code pairing |
 | ⚡ Auto-Start on Boot | Registers with the OS startup system (registry / LaunchAgent / .desktop) |
 | 📋 Clipboard Intelligence | Copy any text → floating panel with Translate / Summarise / Explain / Fix |
@@ -250,13 +252,15 @@ Mark LIII/
 │   ├── browser_control.py    # Web browser control
 │   ├── file_controller.py    # File system operations
 │   ├── file_processor.py     # Document reading and summarization
-│   ├── send_message.py       # Messaging integration
+│   ├── send_message.py       # Confirmation-protected messaging integration
+│   ├── telegram_control.py   # Telegram Desktop search, read, and send workflow
 │   ├── weather_report.py     # Live weather data
 │   ├── flight_finder.py      # Flight search
 │   ├── youtube_video.py      # YouTube playback control
 │   ├── game_updater.py       # Game update management (Steam / Epic)
-│   ├── code_helper.py        # Code review and generation
-│   ├── dev_agent.py          # Developer task agent
+│   ├── code_helper.py        # Code review, generation, and VS Code integration
+│   ├── dev_agent.py          # Confirmed multi-file VS Code project agent
+│   ├── vscode_workspace.py   # Safe workspace inspection, editing, and test/build control
 │   └── desktop.py            # Desktop and taskbar control
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
@@ -265,7 +269,7 @@ Mark LIII/
 ├── core/
 │   ├── prompt.txt            # Assistant personality and tool-routing rules
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
-│   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
+│   ├── confirm.py            # High-impact-action gate — the token is issued by the UI, not the model
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader

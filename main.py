@@ -69,7 +69,7 @@ from actions.background_monitor import (
 )
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
-    get_brief_enabled, get_voice, get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
+    get_brief_enabled, get_autonomous_behavior_enabled, get_voice, get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -456,6 +456,13 @@ class JarvisLive:
         self._voice_text_first   = VOICE_TEXT_FIRST
         self._voice_turn_queue   = None
 
+        # Tool calls are authorized only after a direct user turn (typed, voice,
+        # or dashboard). Background prompts and resumed model context never
+        # inherit that authority. This is a second line of defence beside the
+        # system prompt: even a misrouted model call cannot perform a side effect
+        # during a startup, monitor, or proactive turn.
+        self._user_action_authorized = False
+
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
 
         _base_dir = Path(__file__).resolve().parent
@@ -595,6 +602,9 @@ class JarvisLive:
 
         async def _say():
             try:
+                # Plugin progress speech is assistant-generated context, not a
+                # fresh user command and must not authorize another tool call.
+                self._mark_internal_turn()
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": instruction}]},
                     turn_complete=True,
@@ -667,6 +677,19 @@ class JarvisLive:
         manual = self._dashboard.get_manual_url()
         return url, key, f"{url}/auto-login?key={key}", manual
 
+    def _mark_user_request(self) -> None:
+        """Authorize the current model turn because the user just spoke/typed.
+
+        The flag is deliberately process-local and short-lived in meaning: a
+        background task explicitly clears it before injecting its own prompt.
+        It is not persisted, inferred from memory, or supplied by the model.
+        """
+        self._user_action_authorized = True
+
+    def _mark_internal_turn(self) -> None:
+        """Remove tool authority before any assistant-generated turn."""
+        self._user_action_authorized = False
+
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
@@ -676,6 +699,7 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        self._mark_user_request()
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -877,6 +901,9 @@ class JarvisLive:
         """Fallback: send one buffered utterance to Live as PCM audio."""
         if not data or self.out_queue is None:
             return
+        mark_request = getattr(self, "_mark_user_request", None)
+        if mark_request is not None:
+            mark_request()
         slice_bytes = CHUNK_SIZE * 2
         for start in range(0, len(data), slice_bytes):
             self._enqueue_realtime_audio({
@@ -961,6 +988,7 @@ class JarvisLive:
         if not text or not self.session:
             return
         self._last_user_speech = time.monotonic()
+        self._mark_user_request()
         print(f"[JARVIS] 📝 Forwarding voice transcript: {text}")
         self.ui.write_log("SYS: Voice transcript forwarded to JARVIS as text.")
         await self.session.send_client_content(
@@ -1085,7 +1113,9 @@ class JarvisLive:
                 )
             ),
         )
-        if self._enhanced_live:
+        if self._enhanced_live and get_autonomous_behavior_enabled():
+            # Proactive audio is opt-in. The default is silent: room noise,
+            # memory, and inactivity never authorize a model turn or a tool.
             # Proactive audio: JARVIS stays silent when speech isn't addressed
             # to it (background chatter, talking to someone else in the room).
             # (Affective dialog was dropped: gemini-3.1-flash-live does not
@@ -1098,6 +1128,19 @@ class JarvisLive:
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
         args = dict(fc.args or {})
+
+        if not self._user_action_authorized:
+            # Never let a model-generated follow-up, startup briefing, monitor,
+            # or proactive check turn into a computer action. The user must
+            # issue a fresh direct command before any tool is eligible.
+            msg = (
+                "Blocked: there is no direct user request authorizing this tool "
+                "call. Ask the user what they want before taking any action."
+            )
+            self.ui.write_log(f"SEC: blocked unrequested tool call: {name}")
+            return types.FunctionResponse(
+                id=fc.id, name=name, response={"result": msg}
+            )
 
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
@@ -1353,6 +1396,11 @@ class JarvisLive:
                 {"data": data, "mime_type": INPUT_AUDIO_MIME}
             )
             if level > _VOICE_ACTIVITY_LEVEL:
+                # Native mode streams audio before transcription is available;
+                # authorize at the first local speech frame so its eventual tool
+                # call is still tied to a real user utterance.
+                if not self._voice_speech_active:
+                    self._mark_user_request()
                 self._voice_speech_active = True
                 self._voice_last_activity = now
             elif (
@@ -1690,6 +1738,9 @@ class JarvisLive:
                     shown on the UI content panel. Waits for turn_complete event
                     instead of a fixed sleep so there is no unnecessary gap.
         """
+        if not get_autonomous_behavior_enabled():
+            return
+        self._mark_internal_turn()
         memory   = load_memory()
         identity = memory.get("identity", {})
 
@@ -1740,6 +1791,7 @@ class JarvisLive:
         if self._turn_done_event:
             self._turn_done_event.clear()
 
+        self._mark_internal_turn()
         await self.session.send_client_content(
             turns={"role": "user", "parts": [{"text": p1}]},
             turn_complete=True,
@@ -1796,6 +1848,7 @@ class JarvisLive:
                         f"Let the user know briefly.{lang_str}"
                     )
 
+                self._mark_internal_turn()
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": p2}]},
                     turn_complete=True,
@@ -1847,6 +1900,8 @@ class JarvisLive:
         """Background task: voice alerts when metrics exceed thresholds."""
         while True:
             await asyncio.sleep(10)
+            if not get_autonomous_behavior_enabled():
+                continue
             alert = await asyncio.to_thread(self._sys_monitor.check)
             if not alert or not self.session or not self._awake:
                 continue
@@ -1856,6 +1911,7 @@ class JarvisLive:
             if speaking or (time.monotonic() - self._last_user_speech) < 10:
                 continue
             try:
+                self._mark_internal_turn()
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": alert}]},
                     turn_complete=True,
@@ -1869,6 +1925,9 @@ class JarvisLive:
         """Check user-configured topics once per day; speak alerts when new headlines appear."""
         await asyncio.sleep(300)          # wait 5 min after startup before first check
         while True:
+            if not get_autonomous_behavior_enabled():
+                await asyncio.sleep(1800)
+                continue
             if self.session and self._awake:
                 # Don't interrupt if user spoke recently or JARVIS is mid-sentence
                 with self._speaking_lock:
@@ -1886,6 +1945,7 @@ class JarvisLive:
                                 f"Inform the user about this development naturally in {lang}. "
                                 "One brief sentence only."
                             )
+                            self._mark_internal_turn()
                             await self.session.send_client_content(
                                 turns={"role": "user", "parts": [{"text": msg}]},
                                 turn_complete=True,
@@ -1907,6 +1967,8 @@ class JarvisLive:
         while True:
             await asyncio.sleep(60)   # evaluate once per minute
 
+            if not get_autonomous_behavior_enabled():
+                continue
             if not self.session or not self._awake:
                 continue
 
@@ -1929,6 +1991,7 @@ class JarvisLive:
                     monitors     = monitors or None,
                     recent_turns = recent_turns or None,
                 )
+                self._mark_internal_turn()
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": prompt}]},
                     turn_complete=True,
@@ -2005,6 +2068,7 @@ class JarvisLive:
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
+                    self._mark_user_request()
                     await self.session.send_client_content(
                         turns={"role": "user", "parts": [{"text": text}]},
                         turn_complete=True,
@@ -2068,7 +2132,11 @@ class JarvisLive:
                 # back to v1beta.
                 client = genai.Client(
                     api_key=_get_api_key(),
-                    http_options={"api_version": "v1alpha" if self._enhanced_live else "v1beta"}
+                    http_options={"api_version": (
+                        "v1alpha"
+                        if self._enhanced_live and get_autonomous_behavior_enabled()
+                        else "v1beta"
+                    )}
                 )
 
                 async with (
@@ -2076,6 +2144,9 @@ class JarvisLive:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session          = session
+                    # A fresh/reconnected session starts without tool authority.
+                    # Only a new direct user turn can grant it again.
+                    self._mark_internal_turn()
                     self.audio_in_queue   = asyncio.Queue()
                     # 500 x 64 ms gives the sender room for short network
                     # hiccups without overflowing the PortAudio callback.
@@ -2142,7 +2213,10 @@ class JarvisLive:
                     # Morning briefing — fires once per process launch (if enabled).
                     # Skipped in wake-word mode: it comes up asleep, and a briefing
                     # would mean talking while "asleep".
-                    if not self._briefing_sent and get_brief_enabled() and self._awake:
+                    if (not self._briefing_sent
+                            and get_autonomous_behavior_enabled()
+                            and get_brief_enabled()
+                            and self._awake):
                         self._briefing_sent = True
                         tg.create_task(self._send_startup_briefing())
 
@@ -2229,6 +2303,7 @@ class JarvisLive:
                 else:
                     self._conn_backoff = 3
             finally:
+                self._mark_internal_turn()
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
                 if len(self._session_log) >= 3:

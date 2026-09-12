@@ -11,6 +11,7 @@ except ImportError:
     _SEND2TRASH = False
 
 from core.undo import push_undo
+from core import confirm as confirm_gate
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -646,6 +647,17 @@ def file_controller(
     if player:
         player.write_log(f"[file] {action} {name or path}")
 
+    if action == "delete":
+        if confirm_gate.pending_title():
+            return "There is already a confirmation waiting on screen. Ask the user to answer it first."
+        target = f"{path}/{name}" if name else str(path)
+        return confirm_gate.request(
+            key="file-delete",
+            title="Delete file or folder",
+            detail=f"Target: {target}\n\nThe item will be moved to the system Trash/Recycle Bin when supported.",
+            run=lambda: delete_file(path, name=name),
+        )
+
     try:
         if action == "list":
             return list_files(path)
@@ -711,7 +723,7 @@ def file_controller(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+    "description": "Manages files and folders: list, create, read, write, find, move, copy, rename, and disk usage. Delete is always protected by the human confirmation gate.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

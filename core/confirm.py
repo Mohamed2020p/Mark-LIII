@@ -28,9 +28,11 @@ THE DESIGN HERE
     burned two tool round trips (reject, then re-call) on every shutdown.
 
 WHAT BELONGS HERE AND WHAT DOES NOT
-    Only genuinely irreversible things. Anything that can be reversed should be
-    done at once and pushed onto core/undo.py instead — undo is faster than a
-    question, and an assistant that asks before every action is one nobody uses.
+    Use this gate for externally visible or high-impact operations: sending a
+    message, installing packages, executing arbitrary commands, deleting data,
+    and power/network changes. Ordinary, explicitly requested reversible work
+    can stay fast and use core/undo.py instead; the gate is not a blanket prompt
+    before every harmless action.
 """
 
 from __future__ import annotations

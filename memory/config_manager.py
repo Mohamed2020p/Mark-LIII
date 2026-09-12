@@ -125,6 +125,21 @@ def get_brief_enabled() -> bool:
     return load_api_keys().get("morning_brief_enabled", True)
 
 
+def get_autonomous_behavior_enabled() -> bool:
+    """Return whether background speech/checks are explicitly enabled.
+
+    The safe default is off.  A remembered setting from an older build must not
+    silently grant JARVIS permission to speak or inspect the computer after this
+    process starts; only the new, explicit opt-in setting enables it.
+    """
+    return bool(load_api_keys().get("autonomous_behavior_enabled", False))
+
+
+def save_autonomous_behavior_enabled(enabled: bool) -> None:
+    """Persist the user's explicit choice about autonomous background behavior."""
+    _patch_config(autonomous_behavior_enabled=bool(enabled))
+
+
 def save_brief_enabled(enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}

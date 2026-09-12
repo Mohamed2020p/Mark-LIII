@@ -4,6 +4,8 @@ import sys
 import time
 from pathlib import Path
 
+from core import confirm as confirm_gate
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -134,12 +136,29 @@ def _search_in_app(query: str) -> None:
     _clear_and_paste(query)
     time.sleep(1.0)
 
+def _telegram_search(query: str) -> None:
+    """Focus Telegram's global search rather than the current-chat finder."""
+    _require_pyautogui()
+    if not query.strip():
+        raise ValueError("Telegram search text cannot be empty")
+    os_name = _get_os()
+    # Telegram Desktop uses Ctrl/Cmd+K for its global search.  Ctrl/Cmd+F is
+    # the in-chat message finder and can leave the recipient in the wrong chat.
+    search_hotkey = ("command", "k") if os_name == "mac" else ("ctrl", "k")
+    pyautogui.hotkey(*search_hotkey)
+    time.sleep(0.7)
+    _clear_and_paste(query)
+    time.sleep(1.2)
+
 def _desktop_send(app_name: str, receiver: str, message: str) -> str:
     if not _open_app(app_name):
         return f"Could not open {app_name}."
 
     time.sleep(1.0)
-    _search_in_app(receiver)
+    if app_name.strip().lower() == "telegram":
+        _telegram_search(receiver)
+    else:
+        _search_in_app(receiver)
     pyautogui.press("enter")
     time.sleep(0.8)
 
@@ -230,6 +249,24 @@ def _resolve_platform(platform_str: str):
     return lambda r, m: _desktop_send(platform_str.strip().title(), r, m)
 
 
+def _perform_send(platform: str, receiver: str, message_text: str, player=None) -> str:
+    """Perform the GUI send after the human confirmation has been accepted."""
+    preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
+    print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
+    if player:
+        player.write_log(f"[msg] Sending {platform} → {receiver}")
+
+    try:
+        handler = _resolve_platform(platform)
+        result  = handler(receiver, message_text)
+    except Exception as e:
+        result = f"Could not send message: {e}"
+
+    print(f"[SendMessage] {'✅' if 'sent' in result.lower() else '❌'} {result}")
+    if player:
+        player.write_log(f"[msg] {result}")
+    return result
+
 def send_message(
     parameters: dict,
     response=None,
@@ -247,29 +284,25 @@ def send_message(
         return "Please specify the message content."
     if not _PYAUTOGUI:
         return "PyAutoGUI is not installed — cannot control the desktop."
+    if confirm_gate.pending_title():
+        return ("There is already a confirmation waiting on screen. "
+                "Ask the user to answer that one before preparing another message.")
 
-    preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
-    print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
-    if player:
-        player.write_log(f"[msg] {platform} → {receiver}")
-
-    try:
-        handler = _resolve_platform(platform)
-        result  = handler(receiver, message_text)
-    except Exception as e:
-        result = f"Could not send message: {e}"
-
-    print(f"[SendMessage] {'✅' if 'sent' in result.lower() else '❌'} {result}")
-    if player:
-        player.write_log(f"[msg] {result}")
-
-    return result
+    preview = message_text[:120] + ("…" if len(message_text) > 120 else "")
+    title = f"Send {platform} message to {receiver}"
+    detail = f"Recipient: {receiver}\nMessage: {preview}\n\nThe message will be sent through the visible desktop app."
+    return confirm_gate.request(
+        key="send-message",
+        title=title,
+        detail=detail,
+        run=lambda: _perform_send(platform, receiver, message_text, player),
+    )
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "send_message",
-    "description": "Sends a text message via WhatsApp, Telegram, or other messaging platform.",
+    "description": "Prepares a text message via WhatsApp, Telegram, or another visible desktop messaging app. Always requires the user's on-screen confirmation before sending; never claim it was sent while confirmation is pending.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

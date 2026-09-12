@@ -1,9 +1,15 @@
+import os
 import subprocess
 import sys
+import shutil
 import json
 import re
+import shlex
 import time
 from pathlib import Path
+
+from core.undo import push_undo
+from core import confirm as confirm_gate
 
 
 def get_base_dir():
@@ -72,11 +78,51 @@ def _read_file(file_path: str) -> tuple[str, str]:
 
 def _save_file(path: Path, content: str) -> str:
     try:
+        previous = None
+        existed = path.exists()
+        if existed:
+            if path.stat().st_size > 1_000_000:
+                return "Could not save: refusing to overwrite a file larger than 1 MB safely."
+            previous = path.read_text(encoding="utf-8")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        return f"Saved to: {path}"
+
+        def undo() -> str:
+            try:
+                if existed and previous is not None:
+                    path.write_text(previous, encoding="utf-8")
+                    return f"Restored {path}."
+                if path.exists():
+                    path.unlink()
+                return f"Removed {path}."
+            except Exception as exc:
+                return f"Could not undo {path}: {exc}"
+
+        push_undo(f"code edit: {path.name}", undo)
+        return f"Saved to: {path} (undo available)"
     except Exception as e:
         return f"Could not save: {e}"
+
+
+def _open_vscode(target: Path) -> str:
+    """Open a file's workspace when the user asked to work in VS Code."""
+    workspace = target if target.is_dir() else target.parent
+    candidates = []
+    code = shutil.which("code")
+    if code:
+        candidates.append([code, str(workspace)])
+    if sys.platform == "win32":
+        candidates.extend([["code.cmd", str(workspace)], [r"C:\Program Files\Microsoft VS Code\bin\code.cmd", str(workspace)]])
+    elif sys.platform == "darwin":
+        candidates.append(["open", "-a", "Visual Studio Code", str(workspace)])
+    for command in candidates:
+        try:
+            use_shell = os.name == "nt" and str(command[0]).lower().endswith((".cmd", ".bat"))
+            subprocess.Popen(command, shell=use_shell, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return f"VS Code opened: {workspace}"
+        except (FileNotFoundError, OSError):
+            continue
+    return f"VS Code could not be opened automatically; file remains at {target}."
 
 
 def _preview(code: str, lines: int = 10) -> str:
@@ -528,69 +574,121 @@ def code_helper(
     session_memory=None,
     speak=None
 ) -> str:
-    """
-    Called from main.py.
-
-    parameters:
-        action      : write | edit | explain | run | build | screen_debug | optimize | auto
-        description : What the code should do / what change to make / what problem to analyze
-        language    : Programming language (default: python)
-        output_path : Where to save — user specifies full path or filename
-        file_path   : Path to existing file (edit / explain / run / build / optimize)
-        code        : Raw code string (explain/optimize without a file)
-        args        : CLI argument list for run/build
-        timeout     : Execution timeout in seconds (default: 30)
-    """
+    """Handle a single-file coding request, optionally rooted in a VS Code workspace."""
     p           = parameters or {}
-    action      = p.get("action", "auto").lower().strip()
-    description = p.get("description", "").strip()
-    language    = p.get("language", "python").strip()
-    output_path = p.get("output_path", "").strip()
-    file_path   = p.get("file_path", "").strip()
-    code        = p.get("code", "").strip()
+    action      = str(p.get("action", "auto")).lower().strip()
+    description = str(p.get("description", "")).strip()
+    language    = str(p.get("language", "python")).strip() or "python"
+    output_path = str(p.get("output_path", "")).strip()
+    file_path   = str(p.get("file_path", "")).strip()
+    code        = str(p.get("code", "")).strip()
     args        = p.get("args", [])
+    if isinstance(args, str):
+        args = shlex.split(args)
     timeout     = int(p.get("timeout", 30))
+    workspace_raw = str(p.get("workspace_path", "")).strip()
+    open_in_vscode = _as_bool(p.get("open_in_vscode"), bool(workspace_raw))
+
+    workspace = None
+    if workspace_raw:
+        workspace = Path(workspace_raw).expanduser()
+        if not workspace.is_absolute():
+            workspace = Path.cwd() / workspace
+        workspace = workspace.resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        def rooted(value: str) -> str:
+            if not value:
+                return value
+            candidate = Path(value).expanduser()
+            candidate = candidate if candidate.is_absolute() else workspace / candidate
+            candidate = candidate.resolve()
+            try:
+                candidate.relative_to(workspace)
+            except ValueError as exc:
+                raise ValueError("Path escapes the requested VS Code workspace.") from exc
+            return str(candidate)
+
+        try:
+            file_path = rooted(file_path)
+            output_path = rooted(output_path)
+        except ValueError as exc:
+            return f"Workspace path rejected: {exc}"
+        if not output_path and action in {"write", "build", "auto"} and not file_path:
+            ext = {"python": ".py", "py": ".py", "javascript": ".js", "js": ".js", "typescript": ".ts", "ts": ".ts"}.get(language.lower(), ".txt")
+            output_path = str(workspace / f"jarvis_code{ext}")
 
     if action == "auto":
         action = _detect_intent(description, file_path, code)
         print(f"[Code] 🤖 Auto-detected: {action}")
 
-    if action == "write":
-        return _write_action(description, language, output_path, player)
+    if action in {"run", "build"}:
+        if confirm_gate.pending_title():
+            return "There is already a confirmation waiting on screen. Ask the user to answer it first."
+        target = Path(file_path) if action == "run" else Path(output_path or workspace or Path.cwd())
 
-    elif action == "edit":
-        return _edit_action(
-            file_path,
-            description or p.get("instruction", ""),
-            player
+        def protected_code_run() -> str:
+            if action == "run":
+                result = _run_action(file_path, args, timeout, player)
+            else:
+                result = _build(description, language, output_path, args, timeout, speak, player)
+            if open_in_vscode:
+                result = f"{result}\n\n{_open_vscode(target)}"
+            return result
+
+        return confirm_gate.request(
+            key=f"code-{action}",
+            title=f"Run code: {action}",
+            detail=f"Target: {target}\n\nThis will execute code in the requested project.",
+            run=protected_code_run,
         )
 
+    if action == "write":
+        result = _write_action(description, language, output_path, player)
+        target = Path(output_path) if output_path else Path.cwd()
+    elif action == "edit":
+        result = _edit_action(file_path, description or p.get("instruction", ""), player)
+        target = Path(file_path)
     elif action == "explain":
-        return _explain_action(file_path, code, player)
-
-    elif action == "run":
-        return _run_action(file_path, args, timeout, player)
-
-    elif action == "build":
-        return _build(description, language, output_path, args, timeout, speak, player)
-
+        result = _explain_action(file_path, code, player)
+        target = Path(file_path) if file_path else (workspace or Path.cwd())
     elif action == "optimize":
-        return _optimize_action(file_path, code, language, output_path, player)
-
+        result = _optimize_action(file_path, code, language, output_path, player)
+        target = Path(output_path or file_path or workspace or Path.cwd())
     elif action == "screen_debug":
-        return _screen_debug_action(description, file_path, player, speak)
-
+        result = _screen_debug_action(description, file_path, player, speak)
+        target = Path(file_path) if file_path else (workspace or Path.cwd())
     else:
         return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."
+
+    if open_in_vscode:
+        result = f"{result}\n\n{_open_vscode(target)}"
+    return result
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "code_helper",
-    "description": "Writes, edits, explains, runs, or builds code files.",
+    "description": "Writes, edits, explains, runs, builds, debugs, or optimizes a single code file, optionally rooted in and opened through a VS Code workspace. Edits are undoable; execution remains an explicitly requested operation.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
+            "workspace_path": {
+                "type": "STRING",
+                "description": "Existing or new VS Code workspace folder; relative file paths are resolved inside it",
+            },
+            "open_in_vscode": {
+                "type": "BOOLEAN",
+                "description": "Open the target workspace in VS Code after the operation (default true when workspace_path is set)",
+            },
             "action": {
                 "type": "STRING",
                 "description": "write | edit | explain | run | build | auto (default: auto)"
