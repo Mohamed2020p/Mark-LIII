@@ -2383,6 +2383,7 @@ class PluginSettingsOverlay(QWidget):
 
             form.addWidget(self._lbl(label.upper(), 8, color=C.TEXT_DIM))
 
+            field_widget = None
             if ftype == "choice":
                 w = QComboBox()
                 w.addItems([str(o) for o in field.get("options", [])])
@@ -2404,7 +2405,7 @@ class PluginSettingsOverlay(QWidget):
                 w.setCursor(Qt.CursorShape.PointingHandCursor)
                 self._style_toggle(w)
                 w.toggled.connect(lambda _=False, b=w: self._style_toggle(b))
-            else:  # text / password
+            else:  # text / password / local file path
                 w = QLineEdit("" if stored is None else str(stored))
                 w.setFont(QFont("Courier New", 10))
                 w.setFixedHeight(30)
@@ -2414,9 +2415,33 @@ class PluginSettingsOverlay(QWidget):
                 if ftype == "password":
                     w.setEchoMode(QLineEdit.EchoMode.Password)
 
+                field_widget = w
+                if ftype == "file":
+                    row = QWidget()
+                    row_lay = QHBoxLayout(row)
+                    row_lay.setContentsMargins(0, 0, 0, 0)
+                    row_lay.setSpacing(5)
+                    row_lay.addWidget(w, 1)
+                    browse = QPushButton("BROWSE")
+                    browse.setFixedHeight(30)
+                    browse.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+                    browse.setCursor(Qt.CursorShape.PointingHandCursor)
+                    browse.setStyleSheet(
+                        f"QPushButton {{ background: #0f1c35; color: {C.PRI}; "
+                        f"border: 1px solid {C.PRI_DIM}; border-radius: 9px; padding: 0 8px; }}"
+                        f"QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}"
+                    )
+                    browse.clicked.connect(
+                        lambda _=False, edit=w, f=field: self._choose_file(edit, f)
+                    )
+                    row_lay.addWidget(browse)
+                    field_widget = row
+
+            if field_widget is None:
+                field_widget = w
             self._widgets[(ns, key)] = w
             self._types[(ns, key)]   = ftype
-            form.addWidget(w)
+            form.addWidget(field_widget)
 
         # optional test/connect action button + status line
         action = sec.get("action")
@@ -2441,6 +2466,19 @@ class PluginSettingsOverlay(QWidget):
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
         form.addWidget(line)
+
+    def _choose_file(self, edit: QLineEdit, field: dict):
+        """Choose a local file while keeping only its path in plugin settings."""
+        current = edit.text().strip().strip('"')
+        start = str(Path(current).expanduser().parent) if current else str(BASE_DIR)
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            str(field.get("dialog_title") or "Select local file"),
+            start,
+            str(field.get("file_filter") or "All files (*)"),
+        )
+        if selected:
+            edit.setText(selected)
 
     def _style_toggle(self, btn: QPushButton):
         on = btn.isChecked()

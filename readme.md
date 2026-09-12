@@ -66,6 +66,7 @@ It's not just an assistant — it's an extension of your digital life.
 | 🖱️ Desktop Control | Taskbar, window management, desktop-level operations, and installed-app launching such as IDA Pro |
 | 🧑‍💻 Language Handling | Replies in the current user language; it does not save a language preference unless asked |
 | 📱 Remote Dashboard | Control the assistant from your phone via QR code pairing |
+| ☎️ Vonage Owner Call | Optional short, confirmation-protected one-way Voice API call to the configured owner number |
 | ⚡ Auto-Start on Boot | Registers with the OS startup system (registry / LaunchAgent / .desktop) |
 | 📋 Clipboard Intelligence | Copy any text → floating panel with Translate / Summarise / Explain / Fix |
 | 🪪 Assistant Customization | Change the assistant name, your name, voice, and colour from the UI — takes effect immediately |
@@ -216,6 +217,18 @@ python main.py
 
 > ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
 
+### Optional Vonage owner call
+
+The optional `vonage_call` plugin places a short outbound Voice API call only to the owner number configured in **⚙ → Plugin Settings**. It uses the current Vonage Python SDK with an Application ID, a local private-key file path, a registered/owner destination number, and a permitted caller/from number. Enter the owner/from numbers with a leading `+` or normal separators; JARVIS normalizes them to Vonage's digits-only Voice API format. The private-key contents stay on the machine and are never stored in `config/api_keys.json` or sent to JARVIS chat.
+
+The first implementation uses an inline NCCO `talk` action, so it does not need an Answer URL, ngrok, or a public webhook. It is a one-way text-to-speech smoke test, not a live two-way AI phone conversation. Every real call waits for the desktop HUD or authenticated dashboard confirmation. Vonage trial limitations, number ownership, account credit, and regional Voice API charges still apply; the documented trial caller ID is available as the default, but paid accounts should use an allowed Vonage caller number.
+
+1. Install dependencies with `python setup.py` or `pip install -r requirements.txt`.
+2. Open **⚙ → Plugin Settings → VONAGE VOICE OWNER CALL**.
+3. Enter the Application ID, the path to the downloaded private key, and your own registered number. Keep the default short test message for the first call.
+4. Enable the bridge, save, and use the **TEST VONAGE CREDENTIALS** action. This performs a read-only API check and never places a call.
+5. Ask JARVIS explicitly to call you with a short message, then press **CONFIRM** in the visible confirmation control.
+
 ---
 
 ## 📋 Requirements
@@ -227,6 +240,7 @@ python main.py
 | **Microphone** | Required for voice interaction (and for the "Hey Jarvis" wake word) |
 | **Speakers** | Required for voice replies |
 | **API Key** | Free Gemini API key (entered on first launch → `config/api_keys.json`) |
+| **Vonage Voice** *(optional)* | `vonage>=4.8.0`, a Voice Application ID, and a local private-key file; configured only for the owner's number |
 | **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
 
 ---

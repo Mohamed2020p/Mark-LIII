@@ -39,8 +39,9 @@ google-api-python-client
 google-auth-oauthlib
 
 # ── Optional integrations / media skills ─────────────────────────────────────
-# Twilio is used only when the owner enables the phone bridge in Plugin Settings.
+# Phone bridges are opt-in; Vonage uses the Application ID + local private key Voice API flow.
 twilio>=9.0.0
+vonage>=4.8.0
 
 # ── Plugin extras: Tuya / Smart Life smart light (home_assistant) ─────────────
 tinytuya

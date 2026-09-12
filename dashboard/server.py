@@ -808,6 +808,27 @@ class DashboardServer:
                 "owner_number": str(cfg.get("owner_number", "") or ""),
             }
 
+        def _vonage_snapshot() -> dict:
+            try:
+                from memory.config_manager import get_plugin_config
+                cfg = get_plugin_config("vonage")
+            except Exception:
+                cfg = {}
+            application_id = str(cfg.get("application_id", "") or "")
+            private_key_path = str(cfg.get("private_key_path", "") or "")
+            return {
+                "enabled": bool(cfg.get("enabled", False)),
+                "configured": bool(
+                    application_id and private_key_path and
+                    cfg.get("owner_number") and cfg.get("from_number")
+                ),
+                "application_id": application_id,
+                "private_key_path": private_key_path,
+                "owner_number": str(cfg.get("owner_number", "") or ""),
+                "from_number": str(cfg.get("from_number", "") or ""),
+                "message": str(cfg.get("message", "") or ""),
+            }
+
         @app.get("/api/overview")
         async def overview(req: Request):
             if not _auth(req):
@@ -829,6 +850,7 @@ class DashboardServer:
                 "history": len(self._history),
                 "system": system,
                 "twilio": _twilio_snapshot(),
+                "vonage": _vonage_snapshot(),
             })
 
         @app.get("/api/twilio")
@@ -881,6 +903,64 @@ class DashboardServer:
                 merged.update({k: v for k, v in body.items() if k in {
                     "account_sid", "auth_token", "from_number", "owner_number"
                 } and str(v or "").strip()})
+                ok, message = await asyncio.to_thread(_test_connection, merged)
+                return JSONResponse({"ok": bool(ok), "message": str(message)})
+            except Exception as exc:
+                return JSONResponse({"ok": False, "message": str(exc)})
+
+        @app.get("/api/vonage")
+        async def vonage_status(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse(_vonage_snapshot())
+
+        @app.post("/api/vonage")
+        async def save_vonage(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            try:
+                from memory.config_manager import save_plugin_config
+                values = {}
+                for key in (
+                    "enabled", "application_id", "private_key_path",
+                    "owner_number", "from_number", "message",
+                ):
+                    if key not in body:
+                        continue
+                    if key == "enabled":
+                        raw_enabled = body[key]
+                        values[key] = (
+                            raw_enabled if isinstance(raw_enabled, bool)
+                            else str(raw_enabled).strip().lower() in {"1", "true", "yes", "on"}
+                        )
+                    else:
+                        values[key] = str(body[key] or "").strip()
+                save_plugin_config("vonage", values)
+            except Exception as exc:
+                return JSONResponse({"error": f"Could not save Vonage settings: {exc}"}, status_code=500)
+            return JSONResponse({"ok": True, **_vonage_snapshot()})
+
+        @app.post("/api/vonage/test")
+        async def test_vonage(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+                from memory.config_manager import get_plugin_config
+                from plugins.vonage_call import _test_connection
+                current = get_plugin_config("vonage")
+                merged = dict(current)
+                for key in {
+                    "application_id", "private_key_path", "owner_number",
+                    "from_number", "message",
+                }:
+                    value = str(body.get(key, "") or "").strip()
+                    if value:
+                        merged[key] = value
                 ok, message = await asyncio.to_thread(_test_connection, merged)
                 return JSONResponse({"ok": bool(ok), "message": str(message)})
             except Exception as exc:
