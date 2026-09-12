@@ -32,6 +32,7 @@
       --red: #ff7c9d;
       --shadow: 0 22px 70px rgba(0,0,0,.36);
       --radius: 22px;
+      --keyboard-offset: 0px;
     }
     html, body { min-height: 100%; margin: 0; -webkit-text-size-adjust: 100%; }
     body {
@@ -229,6 +230,7 @@
     .prompt::placeholder { color:var(--muted-2); }
     .send-btn { height:40px; padding:0 17px; border:0; color:#071020; background:linear-gradient(120deg,var(--cyan),#9aa0ff); font-size:10px; font-weight:900; letter-spacing:.15em; }
     .send-btn:hover { filter:brightness(1.08); transform:translateY(-1px); }
+    .send-btn:disabled { cursor:wait; opacity:.62; transform:none; }
     .composer-note { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:7px 5px 0; color:var(--muted-2); font-size:9px; }
     .voice-status { overflow:hidden; color:var(--muted); text-overflow:ellipsis; white-space:nowrap; }
 
@@ -297,7 +299,14 @@
       .mobile-nav::-webkit-scrollbar { display:none; }
       .mobile-nav .nav-btn { width:auto; flex:0 0 auto; padding:9px 11px; white-space:nowrap; font-size:9px; }
       .mobile-nav .nav-icon { width:auto; font-size:13px; }
-      .workspace { display:block; padding:10px 12px 10px; }
+      html, body { height:100%; min-height:100%; overflow:hidden; }
+      body { height:100dvh; }
+      .app-shell { height:100dvh; min-height:0; overflow:hidden; }
+      .workspace {
+        display:block; height:auto; min-height:0; overflow-y:auto;
+        padding:10px 12px calc(124px + env(safe-area-inset-bottom, 0px));
+        overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+      }
       .rail { display:none; }
       .inspector { display:flex; flex-direction:column; gap:12px; margin-top:12px; }
       .inspector-card { padding:14px; }
@@ -311,10 +320,16 @@
       .hero-actions { max-width:240px; }
       .feed-card { min-height:420px; }
       .message, .file-card { max-width:92%; }
-      .composer-wrap { padding:0 10px calc(13px + env(safe-area-inset-bottom)); }
+      .composer-wrap {
+        position:fixed; left:0; right:0; bottom:var(--keyboard-offset, 0px);
+        width:100%; max-width:none; margin:0; padding:8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+        background:linear-gradient(to top, rgba(6,9,22,.98) 68%, rgba(6,9,22,0));
+      }
+      .composer { position:relative; z-index:1; width:100%; }
       .composer-note { display:none; }
+      .prompt, .form-field input { font-size:16px; }
       .attach-btn, .mic-btn { width:36px; height:38px; }
-      .send-btn { padding:0 12px; }
+      .send-btn { padding:0 12px; touch-action:manipulation; }
       .form-grid { grid-template-columns:1fr; }
       .form-field.full { grid-column:auto; }
     }
@@ -325,7 +340,7 @@
       .attach-btn, .mic-btn { width:34px; height:38px; }
       .send-btn { width:40px; padding:0; font-size:0; }
       .send-btn::after { content:"↗"; font-size:16px; }
-      .prompt { font-size:12px; padding-left:2px; padding-right:2px; }
+      .prompt { font-size:16px; padding-left:2px; padding-right:2px; }
       .hero-card { min-height:365px; }
       .audio-control { margin-left:auto; }
     }
@@ -458,7 +473,7 @@
         <input id="file-inp" type="file" multiple style="display:none" accept="*/*">
         <button class="mic-btn" id="mic-btn" type="button" onclick="doMic()" title="Use microphone" aria-label="Use microphone" aria-pressed="false">⌁</button>
         <button class="wake-btn" id="wake" type="button" onclick="doWake()">WAKE</button>
-        <textarea class="prompt" id="inp" rows="1" placeholder="Tell JARVIS what to do…" autocomplete="off"></textarea>
+        <textarea class="prompt" id="inp" rows="1" placeholder="Tell JARVIS what to do…" autocomplete="off" enterkeyhint="send"></textarea>
         <button class="send-btn" id="send-btn" type="button" onclick="doSend()">SEND ↗</button>
       </div>
       <div class="composer-note"><span class="voice-status" id="voice-status">Mic ready · browser speaker off</span><span>Enter to send · Shift + Enter for a new line · Esc stops voice</span></div>
@@ -488,6 +503,25 @@
     const _authToken = sessionStorage.getItem('jarvis_token');
     const _sessionKey = sessionStorage.getItem('jarvis_key');
     if (!_authToken) location.replace('/login');
+
+    // iOS Safari can keep the layout viewport at full height while the virtual
+    // keyboard occupies the bottom of the visual viewport. Lift the fixed
+    // composer by exactly that inset instead of letting the page zoom or hide
+    // the send control.
+    function syncKeyboardInset() {
+      const viewport = window.visualViewport;
+      if (!viewport) return;
+      const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      document.documentElement.style.setProperty('--keyboard-offset', `${Math.round(inset)}px`);
+    }
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', syncKeyboardInset, { passive:true });
+      window.visualViewport.addEventListener('scroll', syncKeyboardInset, { passive:true });
+    }
+    window.addEventListener('resize', syncKeyboardInset, { passive:true });
+    window.addEventListener('orientationchange', () => setTimeout(syncKeyboardInset, 180), { passive:true });
+    syncKeyboardInset();
+
     function _authHeader() { return { 'Authorization': `Bearer ${_authToken}` }; }
     function _authFetch(url, opts = {}) {
       opts.headers = Object.assign({}, opts.headers || {}, _authHeader());
@@ -639,15 +673,28 @@
     }
 
     // ── Command transport ───────────────────────────────────────────────────
+    let _commandSending = false;
     async function doSend() {
-      const input = document.getElementById('inp'); const text = input.value.trim();
-      if (!text) return;
+      const input = document.getElementById('inp');
+      const sendButton = document.getElementById('send-btn');
+      const text = input.value.trim();
+      if (!text || _commandSending) return;
+      _commandSending = true; sendButton.disabled = true; sendButton.setAttribute('aria-busy', 'true');
       input.value = ''; resizePrompt(); append('user', text);
       const enc = _encrypt(text); const body = enc ? { enc } : { text };
       try {
         const response = await _authFetch('/api/command', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-        if (!response.ok) throw new Error((await response.json()).error || 'Command was rejected');
-      } catch (error) { sys(`Could not send command: ${error.message}`); }
+        if (!response.ok) {
+          let message = 'Command was rejected';
+          try { message = (await response.json()).error || message; } catch (_) {}
+          throw new Error(message);
+        }
+      } catch (error) {
+        input.value = text; resizePrompt(); input.focus();
+        sys(`Could not send command: ${error.message}`);
+      } finally {
+        _commandSending = false; sendButton.disabled = false; sendButton.removeAttribute('aria-busy');
+      }
     }
     function quickCommand(text) { document.getElementById('inp').value = text; resizePrompt(); doSend(); }
     function doWake() { sys('Sending wake signal…'); _authFetch('/api/wake', { method:'POST' }).catch(() => sys('Wake signal failed.')); }
