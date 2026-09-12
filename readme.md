@@ -38,7 +38,8 @@ It's not just an assistant — it's an extension of your digital life.
 | 〰️ Reactive HUD | Waveform and reactor core pulse to real audio — your mic while listening, JARVIS while speaking |
 | 🎙️ Voice Picker | Choose from 5 native Gemini voices and switch live from the UI — no restart |
 | ♾️ Unlimited Sessions | Sliding-window context compression — one conversation can last for hours |
-| 🖥️ System Control | Launch apps, adjust volume/brightness, WiFi, shortcuts, power — all by voice |
+| 🖥️ System Control | Launch apps, inspect settings, adjust volume/brightness, WiFi, shortcuts, power — all by explicit request |
+| ⚙️ Process Control | Inspect processes, identify high-CPU work, and stop a requested process with importance checks and human confirmation |
 | 🧩 Explicit Coding Tasks | High-level planning for explicitly requested multi-file projects via agent mode |
 | 👁️ Visual Awareness | Real-time screen capture and webcam vision piped into your main Gemini session |
 | 🧠 Persistent Memory | Deeply remembers projects, preferences, and personal context across sessions |
@@ -61,7 +62,7 @@ It's not just an assistant — it's an extension of your digital life.
 | 📨 Send Message | Search and compose messages through WhatsApp, Telegram, and more; sending waits for human confirmation |
 | 📱 Telegram Control | Open Telegram Desktop, search chats/contacts, read visible text with optional OCR, and send only after confirmation |
 | 🎬 YouTube Control | Search, play, and control YouTube playback by voice |
-| 🖱️ Desktop Control | Taskbar, window management, and desktop-level operations |
+| 🖱️ Desktop Control | Taskbar, window management, desktop-level operations, and installed-app launching such as IDA Pro |
 | 🧑‍💻 Language Handling | Replies in the current user language; it does not save a language preference unless asked |
 | 📱 Remote Dashboard | Control the assistant from your phone via QR code pairing |
 | ⚡ Auto-Start on Boot | Registers with the OS startup system (registry / LaunchAgent / .desktop) |
@@ -248,6 +249,7 @@ Mark LIII/
 │   ├── system_monitor.py     # CPU / RAM / GPU / temperature telemetry
 │   ├── computer_settings.py  # Volume, brightness, WiFi, power (per-OS)
 │   ├── computer_control.py   # Keyboard shortcuts, mouse, window management
+│   ├── process_control.py    # Read-only process inspection and confirmation-protected termination
 │   ├── open_app.py           # Application launcher (per-OS name map)
 │   ├── browser_control.py    # Web browser control
 │   ├── file_controller.py    # File system operations

@@ -1,7 +1,9 @@
+import os
 import time
 import subprocess
 import platform
 import shutil
+from pathlib import Path
 
 try:
     import psutil
@@ -34,6 +36,11 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
     "vscode":             {"Windows": "code",                    "Darwin": "Visual Studio Code",   "Linux": "code"},
     "visual studio code": {"Windows": "code",                    "Darwin": "Visual Studio Code",   "Linux": "code"},
     "code":               {"Windows": "code",                    "Darwin": "Visual Studio Code",   "Linux": "code"},
+    "ida pro":            {"Windows": "IDA Pro",                 "Darwin": "ida64",                 "Linux": "ida64"},
+    "idapro":             {"Windows": "IDA Pro",                 "Darwin": "ida64",                 "Linux": "ida64"},
+    "ida":                {"Windows": "IDA Pro",                 "Darwin": "ida64",                 "Linux": "ida64"},
+    "hex-rays":           {"Windows": "IDA Pro",                 "Darwin": "ida64",                 "Linux": "ida64"},
+    "ida64":              {"Windows": "ida64.exe",               "Darwin": "ida64",                 "Linux": "ida64"},
     "terminal":           {"Windows": "wt",                      "Darwin": "Terminal",             "Linux": "x-terminal-emulator"},
     "cmd":                {"Windows": "cmd.exe",                 "Darwin": "Terminal",             "Linux": "bash"},
     "powershell":         {"Windows": "powershell.exe",          "Darwin": "Terminal",             "Linux": "bash"},
@@ -78,6 +85,29 @@ def _normalize(raw: str) -> str:
     return raw  
 
 def _launch_windows(app_name: str) -> bool:
+
+    # IDA is commonly installed outside PATH. Prefer a direct executable when
+    # available, then fall back to the Start Menu search below. This keeps the
+    # normal launcher workflow while making the explicit "open IDA Pro" request
+    # work for the standard Hex-Rays install locations too.
+    ida_request = app_name.casefold() in {"ida pro", "ida", "ida64.exe", "ida.exe"}
+    if ida_request:
+        roots = [
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+            os.environ.get("LOCALAPPDATA", ""),
+        ]
+        for root in filter(None, roots):
+            root_path = Path(root)
+            for folder in ("IDA Professional*", "Hex-Rays*", "IDA*"):
+                for executable in ("ida64.exe", "ida.exe"):
+                    for candidate in root_path.glob(f"{folder}/{executable}"):
+                        try:
+                            subprocess.Popen([str(candidate)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            time.sleep(1.5)
+                            return True
+                        except Exception as e:
+                            print(f"[open_app] IDA executable failed: {e}")
 
     if shutil.which(app_name) or shutil.which(app_name.split(".")[0]):
         try:
@@ -276,13 +306,13 @@ def open_app(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "open_app",
-    "description": "Opens any application on the computer. Use this whenever the user asks to open, launch, or start any app, website, or program. Always call this tool — never just say you opened it.",
+    "description": "Opens any installed application on the computer, including Telegram, VS Code, IDA Pro, Task Manager, and other desktop apps. Use this whenever the user explicitly asks to open, launch, or start an app or program; always call this tool and report only its confirmed result.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "app_name": {
                 "type": "STRING",
-                "description": "Exact name of the application (e.g. 'WhatsApp', 'Chrome', 'Spotify')"
+                "description": "Exact name of the application (e.g. 'WhatsApp', 'Chrome', 'Spotify', 'IDA Pro')"
             }
         },
         "required": [
