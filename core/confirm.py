@@ -19,9 +19,11 @@ THE DESIGN HERE
 
       1. An action calls `request(...)` with a callable that does the real work.
       2. This module hands the UI a banner with CONFIRM / CANCEL and returns
-         IMMEDIATELY with a sentence for the model to say out loud.
-      3. If — and only if — the user presses CONFIRM, the UI calls `resolve()`,
-         which runs the stored callable off the Qt thread.
+         immediately with a private pending marker; it does not ask the model
+         to read a confirmation message aloud.
+      3. If — and only if — the user presses CONFIRM in the desktop HUD or the
+         authenticated web dashboard, that interface calls `resolve()`, which
+         runs the stored callable off the UI thread.
 
     Nothing blocks. The model keeps talking while the banner is up, so this
     costs no latency at all; in fact it is cheaper than the old gate, which
@@ -37,6 +39,7 @@ WHAT BELONGS HERE AND WHAT DOES NOT
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -84,38 +87,42 @@ def _log(msg: str) -> None:
 def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     """Park an irreversible action behind the on-screen gate.
 
-    Returns the sentence the tool should hand back to the model — phrased as an
-    instruction so the assistant asks the user out loud in their own language,
-    rather than reading an English string verbatim."""
+    Returns a private pending marker for the model. The actual decision stays
+    in the desktop HUD or authenticated web dashboard; no verbal confirmation
+    prompt is generated."""
     global _pending
 
-    if _show_cb is None:
-        # No interface bound (headless, or a very early call). Refuse rather
-        # than silently performing something irreversible.
-        return (f"I cannot confirm '{title}' right now because the interface is "
-                f"not available, so I have not done it.")
-
+    # Always park the callable first. A dashboard can be the only connected
+    # interface, so the desktop callback is optional; without either interface
+    # the action remains safely pending and can never run on its own.
     with _lock:
-        _pending = _Pending(key=key, title=title, detail=detail,
+        # The action key names the operation for logs; the random suffix makes
+        # each web decision one-time even when the same action is requested again.
+        pending_key = f"{key}-{secrets.token_urlsafe(18)}"
+        _pending = _Pending(key=pending_key, title=title, detail=detail,
                             run=run, at=time.monotonic())
 
-    try:
-        _show_cb(title, detail)
-    except Exception as e:
-        with _lock:
-            _pending = None
-        return f"Could not ask for confirmation: {e}. Nothing was done."
+    if _show_cb is not None:
+        try:
+            _show_cb(title, detail)
+        except Exception as e:
+            with _lock:
+                _pending = None
+            return f"Could not ask for confirmation: {e}. Nothing was done."
 
-    _log(f"SYS: Awaiting confirmation — {title}")
-    return (
-        f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
-        f"Say ONE short sentence in the user's own language telling them you need "
-        f"them to confirm it on the HUD before you do it. Do not claim it is done."
-    )
+    # The interface owns the prompt. Do not make the model read a second
+    # confirmation request aloud; the desktop HUD and authenticated dashboard
+    # both expose the actual Confirm/Cancel controls.
+    return "[CONFIRMATION_PENDING]"
 
 
-def resolve(accepted: bool) -> None:
-    """Called by the UI when the user presses CONFIRM or CANCEL.
+def resolve(accepted: bool, key: str | None = None) -> bool:
+    """Resolve the pending action from a trusted interface button.
+
+    ``key`` is optional for the desktop HUD, which already owns the visible
+    banner. The remote dashboard supplies it so a stale phone view cannot
+    answer a newer confirmation accidentally. Returns whether an action was
+    actually consumed.
 
     Runs the stored callable on a worker thread — this is invoked from the Qt
     thread, and shutting the machine down from inside a button handler would
@@ -123,6 +130,10 @@ def resolve(accepted: bool) -> None:
     global _pending
 
     with _lock:
+        if _pending is None:
+            return False
+        if key is not None and key != _pending.key:
+            return False
         p, _pending = _pending, None
 
     if _hide_cb:
@@ -132,15 +143,15 @@ def resolve(accepted: bool) -> None:
             pass
 
     if p is None:
-        return
+        return False
 
     if time.monotonic() - p.at > TIMEOUT_SECONDS:
         _log(f"SYS: Confirmation expired — {p.title}")
-        return
+        return False
 
     if not accepted:
         _log(f"SYS: Cancelled — {p.title}")
-        return
+        return True
 
     def _worker():
         try:
@@ -151,6 +162,24 @@ def resolve(accepted: bool) -> None:
 
     threading.Thread(target=_worker, daemon=True,
                      name=f"confirm-{p.key}").start()
+    return True
+
+
+def pending_details() -> dict | None:
+    """Return safe metadata for an authenticated remote confirmation client."""
+    with _lock:
+        p = _pending
+        if p is None:
+            return None
+        remaining = TIMEOUT_SECONDS - (time.monotonic() - p.at)
+        if remaining <= 0:
+            return None
+        return {
+            "key": p.key,
+            "title": p.title,
+            "detail": p.detail,
+            "expires_in": max(0, int(remaining)),
+        }
 
 
 def pending_title() -> str:

@@ -714,6 +714,41 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        # ── Remote confirmation gate ──────────────────────────────────────────
+
+        @app.get("/api/confirmation")
+        async def confirmation_status(req: Request):
+            """Return the current protected action for the paired browser."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core import confirm as confirm_gate
+            return JSONResponse({"pending": confirm_gate.pending_details()})
+
+        @app.post("/api/confirmation")
+        async def resolve_confirmation(req: Request):
+            """Resolve a pending action only from an authenticated web button."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            action = str(body.get("action", "")).strip().lower()
+            key = str(body.get("key", "")).strip()
+            if action not in {"confirm", "cancel"} or not key:
+                return JSONResponse({"error": "Choose confirm or cancel for the current action."}, status_code=400)
+
+            from core import confirm as confirm_gate
+            pending = confirm_gate.pending_details()
+            if not pending:
+                return JSONResponse({"error": "No confirmation is waiting."}, status_code=409)
+            if key != pending["key"]:
+                return JSONResponse({"error": "That confirmation is no longer current."}, status_code=409)
+            if not confirm_gate.resolve(action == "confirm", key=key):
+                return JSONResponse({"error": "That confirmation expired or was already answered."}, status_code=409)
+            return JSONResponse({"ok": True, "action": action})
+
         # ── Dashboard overview / optional integrations ────────────────────────
 
         def _twilio_snapshot() -> dict:

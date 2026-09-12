@@ -237,6 +237,22 @@
     /* ── toast / modal ───────────────────────────────────────────────────── */
     #toast { position:fixed; z-index:20; top:92px; left:50%; max-width:calc(100% - 30px); padding:10px 15px; border:1px solid rgba(101,242,188,.35); border-radius:99px; color:var(--green); background:rgba(14,37,43,.92); box-shadow:var(--shadow); font-size:11px; font-weight:800; letter-spacing:.06em; opacity:0; pointer-events:none; transform:translate(-50%,-8px); transition:.24s ease; }
     #toast.show { opacity:1; transform:translate(-50%,0); }
+
+    /* ── remote confirmation ─────────────────────────────────────────────── */
+    .confirmation-overlay { position:fixed; z-index:30; inset:0; display:none; align-items:center; justify-content:center; padding:18px; background:rgba(2,5,15,.72); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }
+    .confirmation-overlay.open { display:flex; }
+    .confirmation-card { width:min(520px,100%); padding:22px; border:1px solid rgba(255,201,120,.50); border-radius:22px; background:var(--surface-strong); box-shadow:0 30px 100px rgba(0,0,0,.58), 0 0 38px rgba(255,201,120,.08); }
+    .confirmation-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:13px; }
+    .confirmation-kicker { color:var(--amber); font-size:9px; font-weight:900; letter-spacing:.18em; text-transform:uppercase; }
+    .confirmation-timer { color:var(--muted-2); font:10px ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .confirmation-card h2 { margin:0; color:var(--text); font-size:20px; line-height:1.2; letter-spacing:-.02em; overflow-wrap:anywhere; }
+    .confirmation-detail { max-height:30vh; margin:10px 0 0; overflow:auto; color:var(--muted); font-size:12px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .confirmation-actions { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:20px; }
+    .confirmation-btn { min-height:44px; padding:0 14px; border:1px solid var(--line); border-radius:11px; color:var(--text); background:rgba(255,255,255,.045); cursor:pointer; font-size:10px; font-weight:900; letter-spacing:.12em; touch-action:manipulation; }
+    .confirmation-btn:hover { border-color:var(--line-strong); }
+    .confirmation-btn.primary { color:#071020; border:0; background:linear-gradient(120deg,var(--amber),#ff9fbd); }
+    .confirmation-btn:disabled { cursor:wait; opacity:.58; }
+
     .modal-backdrop { position:fixed; z-index:15; inset:0; display:none; align-items:center; justify-content:center; padding:18px; background:rgba(2,5,15,.70); backdrop-filter:blur(9px); }
     .modal-backdrop.open { display:flex; }
     .modal { width:min(520px,100%); max-height:calc(100vh - 36px); overflow:auto; padding:22px; border:1px solid var(--line-strong); border-radius:22px; background:var(--surface-strong); box-shadow:0 30px 100px rgba(0,0,0,.55); }
@@ -332,6 +348,9 @@
       .send-btn { padding:0 12px; touch-action:manipulation; }
       .form-grid { grid-template-columns:1fr; }
       .form-field.full { grid-column:auto; }
+      .confirmation-overlay { align-items:flex-end; padding:12px 10px calc(12px + env(safe-area-inset-bottom, 0px)); }
+      .confirmation-card { padding:18px; border-radius:18px; }
+      .confirmation-actions { margin-top:16px; }
     }
     @media (max-width:420px) {
       .topbar { gap:6px; }
@@ -351,6 +370,17 @@
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite"></div>
+  <div class="confirmation-overlay" id="confirmation-overlay" role="dialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-detail" aria-hidden="true">
+    <section class="confirmation-card">
+      <div class="confirmation-head"><span class="confirmation-kicker">Action waiting</span><span class="confirmation-timer" id="confirmation-timer"></span></div>
+      <h2 id="confirmation-title">Confirmation required</h2>
+      <p class="confirmation-detail" id="confirmation-detail"></p>
+      <div class="confirmation-actions">
+        <button class="confirmation-btn" id="confirmation-cancel" type="button">CANCEL</button>
+        <button class="confirmation-btn primary" id="confirmation-confirm" type="button">CONFIRM</button>
+      </div>
+    </section>
+  </div>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
@@ -483,7 +513,7 @@
   <div class="modal-backdrop" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onclick="if(event.target===this)closeSettings()">
     <section class="modal">
       <div class="modal-head">
-        <div><div class="eyebrow">Local integration</div><h2 id="settings-title">Twilio owner bridge</h2><p>Give JARVIS an optional outbound line. Credentials stay in the local ignored config and every call still asks for confirmation on the desktop HUD.</p></div>
+        <div><div class="eyebrow">Local integration</div><h2 id="settings-title">Twilio owner bridge</h2><p>Give JARVIS an optional outbound line. Credentials stay in the local ignored config and every call still asks for confirmation in the connected interface.</p></div>
         <button class="close-modal" type="button" aria-label="Close" onclick="closeSettings()">×</button>
       </div>
       <div class="form-grid">
@@ -527,6 +557,68 @@
       opts.headers = Object.assign({}, opts.headers || {}, _authHeader());
       return fetch(url, opts);
     }
+
+    // The web dashboard is a second trusted confirmation surface. It polls a
+    // small authenticated endpoint so the confirmation never has to be spoken
+    // or copied into the command feed.
+    const confirmationOverlay = document.getElementById('confirmation-overlay');
+    const confirmationTitle = document.getElementById('confirmation-title');
+    const confirmationDetail = document.getElementById('confirmation-detail');
+    const confirmationTimer = document.getElementById('confirmation-timer');
+    const confirmationConfirm = document.getElementById('confirmation-confirm');
+    const confirmationCancel = document.getElementById('confirmation-cancel');
+    let _confirmationKey = ''; let _confirmationBusy = false; let _confirmationExpires = 0;
+
+    function renderConfirmation(pending) {
+      if (!pending) {
+        _confirmationKey = ''; _confirmationExpires = 0;
+        confirmationOverlay.classList.remove('open'); confirmationOverlay.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      _confirmationKey = String(pending.key || '');
+      _confirmationExpires = Number(pending.expires_in || 0);
+      confirmationTitle.textContent = String(pending.title || 'Confirmation required');
+      confirmationDetail.textContent = String(pending.detail || 'This protected action is waiting for your decision.');
+      confirmationTimer.textContent = _confirmationExpires ? `${_confirmationExpires}s` : '';
+      confirmationOverlay.classList.add('open'); confirmationOverlay.setAttribute('aria-hidden', 'false');
+    }
+
+    async function answerConfirmation(action) {
+      if (!_confirmationKey || _confirmationBusy) return;
+      _confirmationBusy = true; confirmationConfirm.disabled = true; confirmationCancel.disabled = true;
+      try {
+        const response = await _authFetch('/api/confirmation', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ action, key:_confirmationKey }),
+        });
+        let data = {};
+        try { data = await response.json(); } catch (_) {}
+        if (!response.ok) throw new Error(data.error || 'Confirmation is no longer current');
+        renderConfirmation(null);
+        toast(action === 'confirm' ? 'Action confirmed' : 'Action cancelled');
+      } catch (error) {
+        renderConfirmation(null); toast(error.message);
+      } finally {
+        _confirmationBusy = false; confirmationConfirm.disabled = false; confirmationCancel.disabled = false;
+        pollConfirmation();
+      }
+    }
+
+    confirmationConfirm.addEventListener('click', () => answerConfirmation('confirm'));
+    confirmationCancel.addEventListener('click', () => answerConfirmation('cancel'));
+
+    async function pollConfirmation() {
+      try {
+        const response = await _authFetch('/api/confirmation');
+        if (!response.ok) return;
+        const data = await response.json();
+        renderConfirmation(data.pending || null);
+      } catch (_) {
+        // A temporary phone-network failure must not resolve or alter the action.
+      }
+    }
+    setInterval(pollConfirmation, 1000); pollConfirmation();
+
     const _AES_SALT = 'JARVIS-DASHBOARD-v1';
     let _aesKey = null;
     function _initCrypto(key) {
@@ -781,7 +873,7 @@
     function closeSettings() { document.getElementById('settings-modal').classList.remove('open'); }
     function twilioBody() { return {enabled:document.getElementById('tw-enabled').checked, account_sid:document.getElementById('tw-account').value.trim(), auth_token:document.getElementById('tw-token').value.trim(), from_number:document.getElementById('tw-from').value.trim(), owner_number:document.getElementById('tw-owner').value.trim()}; }
     async function testTwilio() { const status=document.getElementById('tw-modal-status'); status.textContent='Testing credentials…'; try { const response=await _authFetch('/api/twilio/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(twilioBody())}); const data=await response.json(); status.textContent=data.message || (data.ok?'Connection ready.':'Test failed.'); status.style.color=data.ok?'var(--green)':'var(--red)'; } catch (_) { status.textContent='Test request failed.'; status.style.color='var(--red)'; } }
-    async function saveTwilio() { const status=document.getElementById('tw-modal-status'); status.textContent='Saving locally…'; try { const response=await _authFetch('/api/twilio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(twilioBody())}); const data=await response.json(); if(!response.ok) throw new Error(data.error || 'Save failed'); updateTwilio(data); status.style.color='var(--green)'; status.textContent='Saved. Calls still require desktop confirmation.'; toast('Twilio bridge saved'); setTimeout(closeSettings,900); } catch (error) { status.style.color='var(--red)'; status.textContent=error.message; } }
+    async function saveTwilio() { const status=document.getElementById('tw-modal-status'); status.textContent='Saving locally…'; try { const response=await _authFetch('/api/twilio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(twilioBody())}); const data=await response.json(); if(!response.ok) throw new Error(data.error || 'Save failed'); updateTwilio(data); status.style.color='var(--green)'; status.textContent='Saved. Calls still require interface confirmation.'; toast('Twilio bridge saved'); setTimeout(closeSettings,900); } catch (error) { status.style.color='var(--red)'; status.textContent=error.message; } }
 
     function selectView(button, target) {
       document.querySelectorAll('.nav-btn').forEach(btn=>btn.classList.remove('active'));
