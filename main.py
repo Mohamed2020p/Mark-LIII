@@ -93,6 +93,10 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-3.1-flash-live-preview"
+# Gemini 3.1 supports sequential function calling, but not the 2.5-only
+# proactive-audio session option. Keep model-specific config out of the setup
+# payload or the server may accept the socket and later abort it with 1008.
+_LIVE_MODEL_IS_31   = "3.1-flash-live" in LIVE_MODEL
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -410,6 +414,7 @@ class JarvisLive:
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
         self._reconnect_event: asyncio.Event | None = None
+        self._live_send_lock: asyncio.Lock | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
         # ── Session resumption ─────────────────────────────────────────
@@ -605,10 +610,7 @@ class JarvisLive:
                 # Plugin progress speech is assistant-generated context, not a
                 # fresh user command and must not authorize another tool call.
                 self._mark_internal_turn()
-                await self.session.send_client_content(
-                    turns={"role": "user", "parts": [{"text": instruction}]},
-                    turn_complete=True,
-                )
+                await self._send_live_text(instruction)
             except Exception as e:
                 print(f"[PluginSay] {e}")
 
@@ -690,6 +692,51 @@ class JarvisLive:
         """Remove tool authority before any assistant-generated turn."""
         self._user_action_authorized = False
 
+    async def _send_live_text(self, text: str) -> None:
+        """Send a text turn using the Live API's realtime-input path.
+
+        Gemini 3.1 Flash Live accepts ``send_client_content`` only for initial
+        history seeding. Sending ordinary user/tool follow-up text through that
+        older path can close the WebSocket with code 1008 immediately after the
+        microphone detects speech. ``send_realtime_input(text=...)`` is the
+        supported turn-by-turn path for this model.
+        """
+        text = str(text or "").strip()
+        if not text or not self.session:
+            return
+        lock = self._live_send_lock
+        if lock is None:
+            await self.session.send_realtime_input(text=text)
+            return
+        async with lock:
+            if self.session:
+                await self.session.send_realtime_input(text=text)
+
+    async def _send_live_video(self, data: bytes, mime_type: str) -> None:
+        """Send one vision frame through the realtime-input API."""
+        if not data or not self.session:
+            return
+        blob = types.Blob(data=data, mime_type=mime_type)
+        lock = self._live_send_lock
+        if lock is None:
+            await self.session.send_realtime_input(video=blob)
+            return
+        async with lock:
+            if self.session:
+                await self.session.send_realtime_input(video=blob)
+
+    async def _send_live_tool_response(self, function_responses) -> None:
+        """Serialize a function response with other Live socket writes."""
+        if not self.session:
+            return
+        lock = self._live_send_lock
+        if lock is None:
+            await self.session.send_tool_response(function_responses=function_responses)
+            return
+        async with lock:
+            if self.session:
+                await self.session.send_tool_response(function_responses=function_responses)
+
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
@@ -701,10 +748,7 @@ class JarvisLive:
             return
         self._mark_user_request()
         asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"role": "user", "parts": [{"text": text}]},
-                turn_complete=True
-            ),
+            self._send_live_text(text),
             self._loop
         )
 
@@ -917,8 +961,8 @@ class JarvisLive:
 
         Prefer the optional local Whisper engine, then use the same Gemini API key
         with a small multimodal transcription request. Either result is forwarded
-        through ``send_client_content`` so the assistant receives ordinary text
-        and can run tools reliably.
+        through the Live realtime text-input path so the assistant receives
+        ordinary text and can run tools reliably.
         """
         if len(data) < int(SEND_SAMPLE_RATE * 2 * _MIN_VOICE_TURN_SECONDS):
             return ""
@@ -991,19 +1035,13 @@ class JarvisLive:
         self._mark_user_request()
         print(f"[JARVIS] 📝 Forwarding voice transcript: {text}")
         self.ui.write_log("SYS: Voice transcript forwarded to JARVIS as text.")
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": text}]},
-            turn_complete=True,
-        )
+        await self._send_live_text(text)
 
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
         asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"role": "user", "parts": [{"text": text}]},
-                turn_complete=True
-            ),
+            self._send_live_text(text),
             self._loop
         )
 
@@ -1113,7 +1151,11 @@ class JarvisLive:
                 )
             ),
         )
-        if self._enhanced_live and get_autonomous_behavior_enabled():
+        if (
+            self._enhanced_live
+            and not _LIVE_MODEL_IS_31
+            and get_autonomous_behavior_enabled()
+        ):
             # Proactive audio is opt-in. The default is silent: room noise,
             # memory, and inactivity never authorize a model turn or a tool.
             # Proactive audio: JARVIS stays silent when speech isn't addressed
@@ -1237,10 +1279,7 @@ class JarvisLive:
                     await self._save_session_summary()
                     if self.session:
                         try:
-                            await self.session.send_client_content(
-                                turns={"role": "user", "parts": [{"text": "Say a brief natural goodbye to the user."}]},
-                                turn_complete=True,
-                            )
+                            await self._send_live_text("Say a brief natural goodbye to the user.")
                         except Exception:
                             pass
                     await asyncio.sleep(1.5)
@@ -1300,17 +1339,27 @@ class JarvisLive:
             # are {"data": <bytes>, "mime_type": <str>} from _listen_audio and
             # the phone relay. An end marker flushes cached VAD audio when a
             # browser microphone is stopped.
+            lock = self._live_send_lock
             if msg.get("audio_stream_end"):
-                await self.session.send_realtime_input(audio_stream_end=True)
+                if lock is None:
+                    await self.session.send_realtime_input(audio_stream_end=True)
+                else:
+                    async with lock:
+                        if self.session:
+                            await self.session.send_realtime_input(audio_stream_end=True)
                 continue
-            await self.session.send_realtime_input(
-                audio=types.Blob(
-                    data=msg["data"],
-                    # The explicit rate prevents the Live VAD from guessing the
-                    # browser/device rate and missing quiet or short utterances.
-                    mime_type=msg.get("mime_type", INPUT_AUDIO_MIME),
-                )
+            blob = types.Blob(
+                data=msg["data"],
+                # The explicit rate prevents the Live VAD from guessing the
+                # browser/device rate and missing quiet or short utterances.
+                mime_type=msg.get("mime_type", INPUT_AUDIO_MIME),
             )
+            if lock is None:
+                await self.session.send_realtime_input(audio=blob)
+            else:
+                async with lock:
+                    if self.session:
+                        await self.session.send_realtime_input(audio=blob)
 
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
@@ -1605,18 +1654,11 @@ class JarvisLive:
 
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
-                                import base64 as _b64
                                 img_b, mime_t, question, angle = self._pending_vision
                                 self._pending_vision = None
-                                b64 = _b64.b64encode(img_b).decode("ascii")
                                 print(f"[Vision] 📤 {len(img_b):,} bytes (angle={angle}) → main session")
-                                await self.session.send_client_content(
-                                    turns={"role": "user", "parts": [
-                                        {"inline_data": {"mime_type": mime_t, "data": b64}},
-                                        {"text": question},
-                                    ]},
-                                    turn_complete=True,
-                                )
+                                await self._send_live_video(img_b, mime_t)
+                                await self._send_live_text(question)
                                 # Mark next turn_complete behaviour depending on angle
                                 if self._vision_cam_active:
                                     # Camera: keep busy until JARVIS finishes speaking the answer
@@ -1640,9 +1682,7 @@ class JarvisLive:
                             print(f"[JARVIS] 📞 {fc.name}")
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
-                        await self.session.send_tool_response(
-                            function_responses=fn_responses
-                        )
+                        await self._send_live_tool_response(fn_responses)
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
@@ -1792,10 +1832,7 @@ class JarvisLive:
             self._turn_done_event.clear()
 
         self._mark_internal_turn()
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": p1}]},
-            turn_complete=True,
-        )
+        await self._send_live_text(p1)
         self.ui.write_log("SYS: Briefing phase 1 (greeting) sent.")
 
         # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
@@ -1849,10 +1886,7 @@ class JarvisLive:
                     )
 
                 self._mark_internal_turn()
-                await self.session.send_client_content(
-                    turns={"role": "user", "parts": [{"text": p2}]},
-                    turn_complete=True,
-                )
+                await self._send_live_text(p2)
                 self.ui.write_log("SYS: Briefing phase 2 (news) sent.")
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
@@ -1912,10 +1946,7 @@ class JarvisLive:
                 continue
             try:
                 self._mark_internal_turn()
-                await self.session.send_client_content(
-                    turns={"role": "user", "parts": [{"text": alert}]},
-                    turn_complete=True,
-                )
+                await self._send_live_text(alert)
             except Exception as e:
                 print(f"[Monitor] ⚠️ Could not send alert: {e}")
 
@@ -1946,10 +1977,7 @@ class JarvisLive:
                                 "One brief sentence only."
                             )
                             self._mark_internal_turn()
-                            await self.session.send_client_content(
-                                turns={"role": "user", "parts": [{"text": msg}]},
-                                turn_complete=True,
-                            )
+                            await self._send_live_text(msg)
                             self.ui.write_log(f"SYS: Monitor alert sent.")
                             await asyncio.sleep(6)   # gap between consecutive alerts
                     except Exception as e:
@@ -1992,10 +2020,7 @@ class JarvisLive:
                     recent_turns = recent_turns or None,
                 )
                 self._mark_internal_turn()
-                await self.session.send_client_content(
-                    turns={"role": "user", "parts": [{"text": prompt}]},
-                    turn_complete=True,
-                )
+                await self._send_live_text(prompt)
                 self.ui.write_log("SYS: Proactive check-in.")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
@@ -2069,10 +2094,7 @@ class JarvisLive:
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
                     self._mark_user_request()
-                    await self.session.send_client_content(
-                        turns={"role": "user", "parts": [{"text": text}]},
-                        turn_complete=True,
-                    )
+                    await self._send_live_text(text)
                     self.ui.write_log(f"[Web]: {text}")
                 else:
                     print(f"[Dashboard] Dropped command (no session): {text}")
@@ -2134,7 +2156,11 @@ class JarvisLive:
                     api_key=_get_api_key(),
                     http_options={"api_version": (
                         "v1alpha"
-                        if self._enhanced_live and get_autonomous_behavior_enabled()
+                        if (
+                            not _LIVE_MODEL_IS_31
+                            and self._enhanced_live
+                            and get_autonomous_behavior_enabled()
+                        )
                         else "v1beta"
                     )}
                 )
@@ -2144,6 +2170,7 @@ class JarvisLive:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session          = session
+                    self._live_send_lock  = asyncio.Lock()
                     # A fresh/reconnected session starts without tool authority.
                     # Only a new direct user turn can grant it again.
                     self._mark_internal_turn()
