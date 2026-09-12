@@ -714,6 +714,43 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        @app.get("/api/system-volume")
+        async def system_volume_status(req: Request):
+            """Read the desktop host's master output volume, not browser audio."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from actions.computer_settings import volume_get
+                level = await asyncio.to_thread(volume_get)
+                return JSONResponse({"ok": True, "level": level, "host": True})
+            except Exception as exc:
+                return JSONResponse({"error": f"Host volume unavailable: {exc}"}, status_code=503)
+
+        @app.post("/api/system-volume")
+        async def system_volume_set(req: Request):
+            """Set the desktop host's master output volume from an explicit web control."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+                raw_level = body.get("level") if isinstance(body, dict) else None
+                if raw_level is None or isinstance(raw_level, bool):
+                    raise ValueError
+                if isinstance(raw_level, float) and not raw_level.is_integer():
+                    raise ValueError
+                level = int(raw_level)
+            except (TypeError, ValueError, OverflowError):
+                return JSONResponse({"error": "Volume must be an integer from 0 to 100."}, status_code=400)
+            if not 0 <= level <= 100:
+                return JSONResponse({"error": "Volume must be between 0 and 100."}, status_code=400)
+            try:
+                from actions.computer_settings import volume_set, volume_get
+                await asyncio.to_thread(volume_set, level)
+                actual = await asyncio.to_thread(volume_get)
+                return JSONResponse({"ok": True, "level": actual if actual is not None else level, "host": True})
+            except Exception as exc:
+                return JSONResponse({"error": f"Host volume change failed: {exc}"}, status_code=503)
+
         # ── Remote confirmation gate ──────────────────────────────────────────
 
         @app.get("/api/confirmation")

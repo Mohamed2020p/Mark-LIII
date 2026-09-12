@@ -101,6 +101,8 @@
     .speaker-btn:hover, .speaker-btn.on { color:var(--green); border-color:rgba(101,242,188,.35); background:rgba(101,242,188,.08); }
     .volume-control { display:flex; align-items:center; gap:5px; color:var(--muted-2); font-size:8px; font-weight:850; letter-spacing:.10em; }
     .volume-control input { width:66px; height:4px; accent-color:var(--green); cursor:pointer; }
+    .pc-volume-control input { width:58px; accent-color:var(--cyan); }
+    .pc-volume-control output { min-width:22px; color:var(--text); font:700 9px ui-monospace,SFMono-Regular,Menlo,monospace; }
     .mobile-nav { display:none; }
 
     /* ── three-column workspace ──────────────────────────────────────────── */
@@ -309,6 +311,9 @@
       .top-chip::before { content:"◉"; font-size:12px; }
       .audio-control { padding:3px; }
       .volume-control { display:none; }
+      .pc-volume-control { display:flex; gap:4px; }
+      .pc-volume-control input { width:48px; }
+      .pc-volume-control output { display:none; }
       .speaker-btn { width:32px; height:32px; }
       .top-action::before { content:"⚙"; font-size:15px; }
       .mobile-nav { display:flex; gap:7px; overflow-x:auto; padding:10px 12px 0; scrollbar-width:none; }
@@ -391,9 +396,10 @@
       <div class="top-spacer"></div>
       <div class="top-chip secure" id="enc">AES-256</div>
       <div class="top-chip url-chip" id="url">__IP__:__PORT__</div>
-      <div class="audio-control" aria-label="Browser audio output">
-        <button class="speaker-btn" id="speaker-btn" type="button" onclick="toggleSpeaker()" aria-pressed="false" title="Enable browser audio">🔇</button>
-        <label class="volume-control" title="Browser volume"><span>VOL</span><input id="volume" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Browser volume"></label>
+      <div class="audio-control" aria-label="Browser and desktop audio controls">
+        <button class="speaker-btn" id="speaker-btn" type="button" onclick="toggleSpeaker()" aria-pressed="false" title="Enable browser response audio">🔇</button>
+        <label class="volume-control browser-volume-control" title="Phone/browser response volume"><span>WEB</span><input id="volume" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Phone browser response volume"></label>
+        <label class="volume-control pc-volume-control" title="Desktop host master volume"><span>PC</span><input id="pc-volume" type="range" min="0" max="100" step="1" value="50" aria-label="Desktop host master volume"><output id="pc-volume-value">--</output></label>
       </div>
       <button class="top-action" type="button" onclick="openSettings()">Settings</button>
     </header>
@@ -695,6 +701,45 @@
       localStorage.setItem('jarvis_volume', volume.value);
       if (_playGain) _playGain.gain.value = Number(volume.value) || 0;
     });
+
+    // This slider is deliberately separate from WEB volume: it changes the
+    // desktop host's OS master output through the authenticated dashboard API.
+    const pcVolume = document.getElementById('pc-volume');
+    const pcVolumeValue = document.getElementById('pc-volume-value');
+    let _pcVolumeBusy = false;
+    function showPcVolume(level) {
+      if (level == null || Number.isNaN(Number(level))) { pcVolumeValue.textContent = '--'; return; }
+      const value = Math.max(0, Math.min(100, Math.round(Number(level))));
+      pcVolume.value = String(value); pcVolumeValue.textContent = `${value}%`;
+    }
+    async function loadPcVolume() {
+      try {
+        const response = await _authFetch('/api/system-volume');
+        if (!response.ok) return;
+        const data = await response.json();
+        showPcVolume(data.level);
+      } catch (_) {}
+    }
+    async function setPcVolume(level) {
+      if (_pcVolumeBusy) return;
+      _pcVolumeBusy = true; pcVolume.disabled = true;
+      try {
+        const response = await _authFetch('/api/system-volume', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({level:Number(level)}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Desktop volume change failed');
+        showPcVolume(data.level);
+      } catch (error) {
+        toast(error.message); loadPcVolume();
+      } finally {
+        _pcVolumeBusy = false; pcVolume.disabled = false;
+      }
+    }
+    pcVolume.addEventListener('change', () => setPcVolume(pcVolume.value));
+    loadPcVolume();
+
     function playRemoteAudio(message) {
       if (!_speakerEnabled || !message.data || Number(message.seq || 0) <= _lastAudioSeq) return;
       _lastAudioSeq = Number(message.seq || 0);
@@ -887,7 +932,7 @@
       if(target==='files') toast('Attach a file with ＋ to relay it to your desktop');
     }
     let _toastTimer; function toast(message) { const el=document.getElementById('toast'); el.textContent=message; el.classList.add('show'); clearTimeout(_toastTimer); _toastTimer=setTimeout(()=>el.classList.remove('show'),2800); }
-    setInterval(refreshOverview, 8000); refreshOverview();
+    setInterval(refreshOverview, 8000); setInterval(loadPcVolume, 8000); refreshOverview();
     window.addEventListener('beforeunload',()=>{_manualClose=true;if(_socket) _socket.close();stopVoice();});
     document.addEventListener('keydown',event=>{if(event.key==='Escape'){closeSettings();if(_voiceWs)stopVoice();}});
   </script>

@@ -787,9 +787,6 @@ def computer_settings(
     player=None,
     session_memory=None,
 ) -> str:
-    if not _PYAUTOGUI:
-        return "pyautogui is not installed. Run: pip install pyautogui"
-
     params      = parameters or {}
     raw_action  = params.get("action", "").strip()
     description = params.get("description", "").strip()
@@ -802,6 +799,17 @@ def computer_settings(
             value = detected.get("value")
 
     action = raw_action.lower().strip().replace(" ", "_").replace("-", "_")
+
+    # Volume/brightness on macOS and Linux use native OS tools and do not need
+    # PyAutoGUI. Keep those real host controls available from the dashboard even
+    # when the optional mouse/keyboard package is absent. Windows volume_set
+    # can use pycaw first and reports a clear error if its fallback is unavailable.
+    _native_actions = {
+        "volume_up", "volume_down", "volume_set", "mute", "unmute",
+        "toggle_mute", "brightness_up", "brightness_down",
+    }
+    if not _PYAUTOGUI and action not in _native_actions:
+        return "pyautogui is not installed. Run: pip install pyautogui"
 
     if not action:
         return _suggest(description or raw_action)
@@ -911,7 +919,7 @@ def computer_settings(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_settings",
-    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, brightness and dark mode can be reversed with the `undo` tool.",
+    "description": "Controls the real desktop host OS: master volume, brightness, windows, keyboard, typing, apps, fullscreen, dark mode, WiFi, power, scrolling, tabs, zoom, screenshots and lock screen. Use for ANY single computer control command, including commands received from the web dashboard; volume and brightness change the host computer, not browser-tab audio. restart, shutdown and toggle_wifi put a confirmation control on the user's interface and do NOT happen until they press it — never claim they are done. Volume, brightness and dark mode can be reversed with the `undo` tool.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
